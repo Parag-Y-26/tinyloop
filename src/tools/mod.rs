@@ -102,6 +102,56 @@ fn plan_text(args: &Value) -> String {
     }).unwrap_or_else(|| "plan received".into())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn workspace(name: &str) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("tinyloop-tools-{name}-{}", crate::audit::now_ms()));
+        fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn path_escape_is_rejected() {
+        let root = workspace("escape");
+        let outside = root.parent().unwrap().join("tinyloop-outside.txt");
+        fs::write(&outside, "secret").unwrap();
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let result = execute(&ctx, "read_file", &json!({"path": "../tinyloop-outside.txt"}));
+        assert_eq!(result.status, "error");
+        assert!(result.summary.contains("escapes"));
+    }
+
+    #[test]
+    fn destructive_command_is_rejected() {
+        let root = workspace("command");
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let result = execute(&ctx, "run_command", &json!({"command": "rm -rf /"}));
+        assert_eq!(result.status, "error");
+        assert!(result.summary.contains("not allowlisted") || result.summary.contains("metacharacters"));
+    }
+
+    #[test]
+    fn unknown_tool_is_rejected() {
+        let root = workspace("unknown");
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let result = execute(&ctx, "shell_everything", &json!({}));
+        assert_eq!(result.status, "error");
+        assert!(result.summary.contains("unknown tool"));
+    }
+
+    #[test]
+    fn patch_escape_is_rejected() {
+        let root = workspace("patch-escape");
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let result = execute(&ctx, "apply_patch", &json!({"path": "../outside.txt", "old_string": "a", "new_string": "b"}));
+        assert_eq!(result.status, "error");
+    }
+}
+
+#[allow(clippy::items_after_test_module)]
 pub fn finish_with_artifact(ctx: &ToolContext, status: &str, summary: String, stdout: String, exit_code: Option<i32>) -> ToolResult {
     let budget = observation::resolve_tool_result_budget(8192);
     let _ = fs::create_dir_all(&ctx.artifacts);

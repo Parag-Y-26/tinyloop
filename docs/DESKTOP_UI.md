@@ -86,8 +86,8 @@ Slop score **1/10**: one borderline point for glass on layered surfaces (titleba
 
 The standalone prototype was exercised with jsdom: initial DOM (2 steps, 3 sessions, approval card), run flow (2 → 7 steps, all done), approval allow, theme toggle, tweaks, and command palette all worked with **zero JS errors**. Two real bugs found and fixed during verification: `localStorage` unavailable on opaque `file://` origins, and a null reference after mutating a running step's class.
 
-The Rust toolchain was found at `~/.cargo/bin` (not on PATH). After exporting it: `cargo test --lib` now passes **16/16** (model probe, tools, loop engine, vendored ports); the React app builds clean; `pnpm tauri build --no-bundle` produces a **12 MB** `tinyloop-tauri.exe`. The app was launched and verified: process responding, window title `tinyloop`, WebView2 renderer running.
+The Rust toolchain was found at `~/.cargo/bin` (not on PATH). Final state: `cargo test --lib` passes **30/30**; core and Tauri `cargo clippy --all-targets -- -D warnings` are clean; `pnpm build` and `pnpm test` (**2/2**) pass. The app launches with window title `tinyloop`, responding, WebView2 active. Installers built: MSI 4.59 MiB and NSIS 3.32 MiB.
 
-`run_task` is wired end-to-end: Tauri command → startup probe → `run_agent` → `run_event` stream → React timeline. It has not been exercised against a live llama-server because neither `llama-server` nor the GGUF is installed on this machine.
+`run_task` is wired end-to-end: Tauri command → startup probe → `run_agent` → `run_event` stream → React timeline, with approval and cancel commands. Real-model eval: **15/15** tasks passed (`docs/EVAL_RESULTS.md`). The only unautomated surface is clicking Allow/Deny inside the native window; the approval gate itself is covered by core tests.
 
 One contract fix found during integration: the Tauri dependency must use the root package name `tinyloop` even though the library crate is `tinyloop_core`.

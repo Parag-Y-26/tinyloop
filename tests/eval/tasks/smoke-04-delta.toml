@@ -1,0 +1,12 @@
+id = "smoke-04-delta"
+goal = "Read answer.txt. Replace the text TODO with the exact token delta. Then call finish. Do not change other files."
+done_condition = "answer.txt contains delta"
+boundaries = ["do not edit other files", "stay inside the workspace"]
+max_steps = 6
+
+[[fixture]]
+path = "answer.txt"
+content = "TODO\n"
+
+[verify]
+command = "findstr /C:\"delta\" answer.txt"

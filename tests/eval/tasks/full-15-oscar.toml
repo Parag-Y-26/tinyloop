@@ -1,0 +1,12 @@
+id = "full-15-oscar"
+goal = "Read answer.txt. Replace the text TODO with the exact token oscar. Then call finish. Do not change other files."
+done_condition = "answer.txt contains oscar"
+boundaries = ["do not edit other files", "stay inside the workspace"]
+max_steps = 6
+
+[[fixture]]
+path = "answer.txt"
+content = "TODO\n"
+
+[verify]
+command = "findstr /C:\"oscar\" answer.txt"

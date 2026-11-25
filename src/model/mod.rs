@@ -59,7 +59,8 @@ where
 {
     let value = Value::deserialize(deserializer)?;
     match value {
-        Value::String(text) => serde_json::from_str(&text).map_err(serde::de::Error::custom),
+        Value::String(text) => Ok(serde_json::from_str(&text)
+            .unwrap_or_else(|_| serde_json::json!({ "__unparsed": text }))),
         other => Ok(other),
     }
 }
@@ -394,6 +395,15 @@ mod tests {
         assert_eq!(json["parallel_tool_calls"], false);
         assert_eq!(json["tools"][0]["type"], "function");
         assert_eq!(json["tools"][0]["function"]["name"], "read_file");
+    }
+
+    #[test]
+    fn malformed_tool_arguments_become_a_tool_error_not_a_parse_crash() {
+        let raw = r#"{"choices":[{"message":{"content":null,"tool_calls":[
+            {"id":"c1","type":"function","function":{"name":"read_file","arguments":"{not json"}}]},
+            "finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#;
+        let parsed: ChatResponse = serde_json::from_str(raw).unwrap();
+        assert!(parsed.tool_calls()[0].function.arguments.get("__unparsed").is_some());
     }
 
     #[test]

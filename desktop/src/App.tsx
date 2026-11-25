@@ -5,6 +5,7 @@ type Status = 'done' | 'running' | 'blocked' | 'pending';
 type Step = { id: number; title: string; detail: string; status: Status; meta: string };
 type Mode = 'ask' | 'auto' | 'dry';
 type UiEvent = { kind: string; title: string; detail: string; status: Status; meta: string };
+type PendingApproval = { id: string; tool: string; args: unknown; hash: string };
 const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
@@ -26,6 +27,11 @@ export default function App() {
   const [resultCap, setResultCap] = useState<number | null>(null);
   const [workspace, setWorkspace] = useState('C:/Users/parag/Downloads/tinyloop');
   const [verifyCommand, setVerifyCommand] = useState('cargo test --lib');
+  const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [doneCondition, setDoneCondition] = useState('the verifier command exits 0');
+  const [boundariesText, setBoundariesText] = useState('do not edit test files\nstay inside the workspace\nno network');
+  const [clarifyOpen, setClarifyOpen] = useState(false);
+  const [clarified, setClarified] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -44,14 +50,17 @@ export default function App() {
   // In a browser preview this guard is false and the prototype simulation runs.
   useEffect(() => {
     if (!isTauri) return;
-    let off: (() => void) | undefined;
-    import('@tauri-apps/api/event').then(({ listen }) => {
-      listen<UiEvent>('run_event', event => {
+    let cancelled = false;
+    let offs: Array<() => void> = [];
+    import('@tauri-apps/api/event').then(async ({ listen }) => {
+      const a = await listen<UiEvent>('run_event', event => {
         const e = event.payload;
         setSteps(s => [...s, { id: Date.now() + Math.random(), title: e.title, detail: e.detail, status: e.status, meta: e.meta }]);
-      }).then(fn => { off = fn; });
+      });
+      const b = await listen<PendingApproval>('approval_required', event => setPendingApproval(event.payload));
+      if (cancelled) { a(); b(); } else { offs = [a, b]; }
     });
-    return () => off?.();
+    return () => { cancelled = true; offs.forEach(fn => fn()); };
   }, []);
 
   useEffect(() => {
@@ -66,18 +75,18 @@ export default function App() {
 
   const add = (s: Omit<Step, 'id'>) => setSteps(prev => [...prev, { ...s, id: Date.now() + Math.random() }]);
 
-  const run = async () => {
+  const executeRun = async () => {
     if (running) return;
     setRunning(true);
     const text = composer.trim() || 'Run sample: repo tax investigation';
-    setTitle(text); setComposer(''); setSteps([]);
+    setTitle(text); setComposer(''); setSteps([]); setPendingApproval(null);
     if (isTauri) {
       try {
         const { invoke } = await import('@tauri-apps/api/core');
         const report = await invoke<{ status?: string; steps: number; prompt_tokens: number; completion_tokens: number; cache_hits: number }>('run_task', {
           task: text,
-          doneCondition: 'the verifier command exits 0',
-          boundaries: ['do not edit test files', 'stay inside the workspace', 'no network'],
+          doneCondition,
+          boundaries: boundariesText.split('\n').map(s => s.trim()).filter(Boolean),
           verifyCommand,
           cwd: workspace,
           mode,
@@ -103,6 +112,31 @@ export default function App() {
     setApproval('allowed'); setRunning(false);
   };
 
+  const decide = async (decision: 'approve' | 'deny') => {
+    if (!pendingApproval) return;
+    const id = pendingApproval.id;
+    setPendingApproval(null);
+    setApproval(decision === 'approve' ? 'allowed' : 'denied');
+    if (isTauri) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      try { await invoke(decision, { id }); } catch { /* core will deny on timeout */ }
+    }
+  };
+
+  const cancel = async () => {
+    if (isTauri) {
+      const { invoke } = await import('@tauri-apps/api/core');
+      try { await invoke('cancel_run'); } catch { /* ignore */ }
+    }
+    setRunning(false);
+  };
+
+  const run = () => {
+    if (running) return;
+    if (!clarified) { setClarifyOpen(true); return; }
+    void executeRun();
+  };
+
   const mark = (s: Status) => s === 'done' ? '✓' : s === 'running' ? '⟳' : s === 'blocked' ? '!' : '·';
 
   return (
@@ -117,6 +151,7 @@ export default function App() {
         ))}</div>
         <div className="pill"><i className="live"/>Spark X2.6 · 4B · 8K</div>
         <button className="icon-btn" aria-label="Appearance" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>◐</button>
+        {running && <button className="icon-btn" aria-label="Cancel run" onClick={cancel}>■</button>}
         <button className="run-btn" disabled={running} onClick={run}>▶ Run</button>
       </header>
 
@@ -126,7 +161,7 @@ export default function App() {
             {sessions.map((s, i) => <button className="session" aria-selected={i === 0} key={s}>
               <span className="s-icon">{i + 1}</span><span><span className="s-title">{s}</span><span className="s-meta">bounded loop</span></span>
             </button>)}</div>
-          <button className="new-btn" onClick={() => setPalette(true)}>＋ New task</button>
+          <button className="new-btn" onClick={() => { setClarified(false); setClarifyOpen(true); }}>＋ New task</button>
           <div className="side-foot"><div className="side-label">Model</div>
             <div className="metric"><span>Cache hits</span><b>{cache}</b></div>
             <div className="metric"><span>Context</span><b>8192</b></div>
@@ -163,14 +198,27 @@ export default function App() {
           <div className="section"><h2>Verifier</h2><div className="contract"><p><code>cargo test --quiet</code><br/><span className="k">Judge</span><code>Rust, not the model</code></p></div></div>
           <div className="divider"/>
           <div className="section"><h2>Approval</h2>
-            {approval === 'pending' ? <div className="approval"><div className="head"><i className="dot2"/>Approval required</div>
-              <div className="cmd">apply_patch src/tax.rs</div><div className="hash">bound to sha256:9f2a…c41d</div>
-              <div className="actions"><button className="btn primary" onClick={() => setApproval('allowed')}>Allow</button>
-                <button className="btn quiet" onClick={() => setApproval('denied')}>Deny</button></div></div>
-              : <div className="resolved"><span className="ok">{approval === 'allowed' ? '✓' : '×'}</span> {approval === 'allowed' ? 'Approved and bound' : 'Denied — no changes made'}</div>}
+            {pendingApproval ? <div className="approval"><div className="head"><i className="dot2"/>Approval required</div>
+              <div className="cmd">{pendingApproval.tool} {JSON.stringify(pendingApproval.args)}</div>
+              <div className="hash">bound to sha256:{pendingApproval.hash.slice(0, 8)}…{pendingApproval.hash.slice(-4)}</div>
+              <div className="actions"><button className="btn primary" onClick={() => void decide('approve')}>Allow</button>
+                <button className="btn quiet" onClick={() => void decide('deny')}>Deny</button></div></div>
+              : <div className="resolved"><span className="ok">{approval === 'allowed' ? '✓' : approval === 'denied' ? '×' : '·'}</span> {approval === 'allowed' ? 'Approved and bound' : approval === 'denied' ? 'Denied — no changes made' : 'Waiting for a gate'}</div>}
           </div>
         </aside>
       </div>
+
+      {clarifyOpen && <div className="palette open" onClick={() => setClarifyOpen(false)}><div className="pbox clarify" onClick={e => e.stopPropagation()}>
+        <h3>Confirm the goal</h3>
+        <label className="k">Done when</label>
+        <textarea className="clarify-input" rows={3} value={doneCondition} onChange={e => setDoneCondition(e.target.value)} />
+        <label className="k">Boundaries — one per line</label>
+        <textarea className="clarify-input" rows={4} value={boundariesText} onChange={e => setBoundariesText(e.target.value)} />
+        <div className="actions">
+          <button className="btn quiet" onClick={() => setClarifyOpen(false)}>Cancel</button>
+          <button className="btn primary" onClick={() => { setClarified(true); setClarifyOpen(false); void executeRun(); }}>Confirm &amp; Run</button>
+        </div>
+      </div></div>}
 
       {palette && <div className="palette open" onClick={() => setPalette(false)}><div className="pbox" onClick={e => e.stopPropagation()}>
         <input placeholder="Type a command…" autoFocus aria-label="Command"/>

@@ -47,7 +47,22 @@ tinyloop/
 
 Desktop app (Tauri 2 + React 19). Open [`desktop/prototype.html`](desktop/prototype.html) for the clickable UI prototype; `desktop/` holds the real app. The CLI is retained as a thin headless wrapper over `tinyloop-core`.
 
-**Run it:** `cd desktop && pnpm install && pnpm tauri dev` — or launch the built binary at `desktop/src-tauri/target/release/tinyloop-tauri.exe`.
+**Run it:** start the model server first, then the app.
+
+```bash
+# terminal 1
+cd ~/.llama/models
+llama serve -m Spark-X2.6-4B-Q4_K_M.gguf -a spark-x26 -c 8192 -np 1 -ngl all -fa on --jinja --host 127.0.0.1 --port 9941
+
+# terminal 2
+cd desktop && pnpm tauri dev
+```
+
+Or launch the built binary at `desktop/src-tauri/target/release/tinyloop-tauri.exe`.
+
+**Verified against the real model:** `llama serve` build 12652, Spark-X2.6-4B Q4_K_M, 8192 ctx. Capability probe: tools visible (23 → 130 prompt tokens), native tool call parsed. Eval suite: **15/15 tasks**, 4,551 tok/s prefill, 40.9 tok/s decode, 88.9% cache hits, 0 tool errors — see [`docs/EVAL_RESULTS.md`](docs/EVAL_RESULTS.md).
+
+**Installers:** MSI and NSIS builds are in `desktop/src-tauri/target/release/bundle/`.
 - [`docs/MODEL_PROFILE.md`](docs/MODEL_PROFILE.md) — exact `llama-server` command and gotchas
 - [`docs/research/INDEX.md`](docs/research/INDEX.md) — OpenClaw, DeepSeek Harness/ECC, small-model harnesses, runtime verification
 
