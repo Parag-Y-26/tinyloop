@@ -97,6 +97,11 @@ fn ui_event(event: &RunEvent) -> UiEvent {
             detail: format!("{} {}", request.tool, compact(&request.args)),
             status: "running".into(), meta: request.hash.chars().take(8).collect(),
         },
+        RunEvent::Compacted { before_tokens, after_tokens } => UiEvent {
+            kind: "compaction".into(), title: "Compacted".into(),
+            detail: format!("{before_tokens} -> {after_tokens} estimated tokens"),
+            status: "done".into(), meta: "state.md".into(),
+        },
     }
 }
 
@@ -105,6 +110,7 @@ fn context_budget() -> usize {
     tinyloop_core::tools::observation::resolve_tool_result_budget(8192).max_chars
 }
 
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn run_task(
     app: tauri::AppHandle,

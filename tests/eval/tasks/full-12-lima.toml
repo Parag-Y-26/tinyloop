@@ -1,0 +1,12 @@
+id = "full-12-lima"
+goal = "Read answer.txt. Replace the text TODO with the exact token lima. Then call finish. Do not change other files."
+done_condition = "answer.txt contains lima"
+boundaries = ["do not edit other files", "stay inside the workspace"]
+max_steps = 6
+
+[[fixture]]
+path = "answer.txt"
+content = "TODO\n"
+
+[verify]
+command = "findstr /C:\"lima\" answer.txt"

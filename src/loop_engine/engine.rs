@@ -5,6 +5,8 @@
 
 use crate::loop_engine::repeat_guard::{self, RepeatState, Verdict};
 use crate::model::{ChatRequest, ChatResponse, ChatTransport, Message, ModelError};
+use crate::audit::AuditLog;
+use crate::context::{self, ContextState};
 use crate::tools::{self, RunMode, ToolContext, ToolResult};
 use serde::Serialize;
 use serde_json::Value;
@@ -58,6 +60,7 @@ pub struct RunConfig {
     pub boundaries: Vec<String>,
     pub verify_command: Option<String>,
     pub max_steps: usize,
+    pub context_tokens: usize,
     pub cancel: Arc<AtomicBool>,
 }
 
@@ -66,12 +69,14 @@ impl RunConfig {
         Self {
             model: model.into(), task: task.into(), done_condition: done_condition.into(),
             boundaries: vec![], verify_command: None, max_steps: 12,
+            context_tokens: context::DEFAULT_CONTEXT_TOKENS,
             cancel: Arc::new(AtomicBool::new(false)),
         }
     }
     pub fn with_boundaries(mut self, boundaries: Vec<String>) -> Self { self.boundaries = boundaries; self }
     pub fn with_verifier(mut self, command: impl Into<String>) -> Self { self.verify_command = Some(command.into()); self }
     pub fn with_max_steps(mut self, steps: usize) -> Self { self.max_steps = steps; self }
+    pub fn with_context_tokens(mut self, tokens: usize) -> Self { self.context_tokens = tokens.max(512); self }
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self { self.cancel = cancel; self }
 }
 
@@ -88,6 +93,7 @@ pub enum RunEvent {
     Escalated { reason: String },
     TextOnlyRepair { text: String },
     ApprovalRequired(ApprovalRequest),
+    Compacted { before_tokens: usize, after_tokens: usize },
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -97,6 +103,9 @@ pub struct RunReport {
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
     pub cache_hits: u32,
+    pub prompt_ms: f64,
+    pub predicted_ms: f64,
+    pub tool_errors: u32,
     pub final_text: Option<String>,
     pub events: Vec<RunEvent>,
 }
@@ -197,9 +206,46 @@ fn plan_from(args: &Value) -> Vec<String> {
     }).unwrap_or_default()
 }
 
-fn push_emit<F: FnMut(&RunEvent)>(events: &mut Vec<RunEvent>, emit: &mut F, event: RunEvent) {
+fn event_kind(event: &RunEvent) -> &'static str {
+    match event {
+        RunEvent::Plan(_) => "plan",
+        RunEvent::ToolCall { .. } => "tool_call",
+        RunEvent::ToolResult { .. } => "tool_result",
+        RunEvent::Verify { .. } => "verify",
+        RunEvent::Finished { .. } => "finished",
+        RunEvent::Escalated { .. } => "escalated",
+        RunEvent::TextOnlyRepair { .. } => "repair",
+        RunEvent::ApprovalRequired(_) => "approval_required",
+        RunEvent::Compacted { .. } => "compaction",
+    }
+}
+
+fn push_emit<F: FnMut(&RunEvent)>(
+    events: &mut Vec<RunEvent>,
+    emit: &mut F,
+    audit: Option<&AuditLog>,
+    event: RunEvent,
+) {
+    if let Some(log) = audit {
+        log.append(event_kind(&event), serde_json::to_value(&event).unwrap_or(serde_json::Value::Null));
+    }
     events.push(event.clone());
     emit(&event);
+}
+
+fn finalize_run(mut report: RunReport, audit: &AuditLog) -> RunReport {
+    audit.append("report", serde_json::json!({
+        "status": report.status,
+        "steps": report.steps,
+        "prompt_tokens": report.prompt_tokens,
+        "completion_tokens": report.completion_tokens,
+        "cache_hits": report.cache_hits,
+        "prompt_ms": report.prompt_ms,
+        "predicted_ms": report.predicted_ms,
+        "tool_errors": report.tool_errors,
+    }));
+    report.status = report.status.or(Some(RunStatus::MaxSteps));
+    report
 }
 
 pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
@@ -210,7 +256,10 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
     approver: Option<&dyn Approver>,
     mut emit: F,
 ) -> Result<RunReport, ModelError> {
+    let run_id = format!("run-{}-{}", std::process::id(), crate::audit::now_ms());
+    let audit = AuditLog::new(&ctx.root, run_id);
     let mut report = RunReport::default();
+    let mut context_state = ContextState::new(&config.task, &config.done_condition, &config.boundaries);
     let mut messages = vec![
         Message::system(system_prompt(config)),
         Message::user("Start. Call submit_plan with 3 to 6 steps. Do not write prose."),
@@ -223,11 +272,11 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
     while steps < config.max_steps {
         if config.cancel.load(Ordering::Relaxed) {
             let reason = "cancelled by user".to_string();
-            push_emit(&mut report.events, &mut emit, RunEvent::Escalated { reason: reason.clone() });
+            push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Escalated { reason: reason.clone() });
             report.status = Some(RunStatus::Escalated);
             report.final_text = Some(reason);
             report.steps = steps;
-            return Ok(report);
+            return Ok(finalize_run(report, &audit));
         }
         let request = ChatRequest::for_model(&config.model)
             .with_messages(messages.clone())
@@ -237,19 +286,21 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
         report.prompt_tokens += response.usage.prompt_tokens;
         report.completion_tokens += response.usage.completion_tokens;
         report.cache_hits += response.timings.as_ref().map(|t| t.cache_n).unwrap_or(0);
+        report.prompt_ms += response.timings.as_ref().map(|t| t.prompt_ms).unwrap_or(0.0);
+        report.predicted_ms += response.timings.as_ref().map(|t| t.predicted_ms).unwrap_or(0.0);
 
         let call = match response.tool_calls().first().cloned() {
             Some(call) => call,
             None => {
                 text_only_repairs += 1;
                 let text = response.text().unwrap_or("").to_string();
-                push_emit(&mut report.events, &mut emit, RunEvent::TextOnlyRepair { text: text.clone() });
+                push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::TextOnlyRepair { text: text.clone() });
                 if text_only_repairs >= 3 {
                     let reason = "model produced text only three times; no executable action".to_string();
-                    push_emit(&mut report.events, &mut emit, RunEvent::Escalated { reason: reason.clone() });
+                    push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Escalated { reason: reason.clone() });
                     report.status = Some(RunStatus::Escalated);
                     report.final_text = Some(reason);
-                    return Ok(report);
+                    return Ok(finalize_run(report, &audit));
                 }
                 messages.push(Message::assistant(text));
                 messages.push(Message::user("No tool call was made. Call exactly one tool now. Do not answer in prose."));
@@ -258,18 +309,28 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
             }
         };
 
+        if response.finish_reason() == Some("length") {
+            push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::TextOnlyRepair {
+                text: "output limit while generating a tool call; not executed".into(),
+            });
+            messages.push(Message::assistant(response.text().unwrap_or("").to_string()));
+            messages.push(Message::user("The previous tool call was cut off by the output limit and was not executed. Retry with a smaller tool call."));
+            steps += 1;
+            continue;
+        }
+
         steps += 1;
-        push_emit(&mut report.events, &mut emit, RunEvent::ToolCall { name: call.function.name.clone(), args: call.function.arguments.clone() });
+        push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::ToolCall { name: call.function.name.clone(), args: call.function.arguments.clone() });
 
         let mut note = None;
         if call.function.name != "submit_plan" {
             match repeat_guard::observe(&mut repeat, &call.function.name, &call.function.arguments) {
                 Some(Verdict::Stop) => {
                     let reason = repeat_guard::stop_text(&call.function.name, 4);
-                    push_emit(&mut report.events, &mut emit, RunEvent::Escalated { reason: reason.clone() });
+                    push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Escalated { reason: reason.clone() });
                     report.status = Some(RunStatus::Escalated);
                     report.final_text = Some(reason);
-                    return Ok(report);
+                    return Ok(finalize_run(report, &audit));
                 }
                 Some(Verdict::Note) => note = Some(repeat_guard::note_text(&call.function.name, 3)),
                 None => {}
@@ -284,7 +345,7 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
                 args: call.function.arguments.clone(),
                 hash: approval_hash(&call.function.name, &call.function.arguments),
             };
-            push_emit(&mut report.events, &mut emit, RunEvent::ApprovalRequired(request.clone()));
+            push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::ApprovalRequired(request.clone()));
             allowed = match approver {
                 Some(gate) => gate.request(&request) == ApprovalDecision::Allow,
                 None => false,
@@ -299,7 +360,9 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
         if let Some(note) = note {
             result.next_actions.push(note);
         }
-        push_emit(&mut report.events, &mut emit, RunEvent::ToolResult { status: result.status.clone(), summary: result.summary.clone() });
+        context_state.observe(&call.function.name, &result.summary);
+        if result.status == "error" { report.tool_errors += 1; }
+        push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::ToolResult { status: result.status.clone(), summary: result.summary.clone() });
 
         match call.function.name.as_str() {
             "submit_plan" => {
@@ -307,47 +370,48 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
                 if plan.is_empty() {
                     result = ToolResult::error("empty plan", "Submit 3-6 steps.");
                 } else {
-                    push_emit(&mut report.events, &mut emit, RunEvent::Plan(plan));
+                    context_state.next_step = plan.join("; ");
+                    push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Plan(plan));
                 }
             }
             "escalate" => {
                 let reason = call.function.arguments.get("reason").and_then(|v| v.as_str()).unwrap_or("model escalated").to_string();
-                push_emit(&mut report.events, &mut emit, RunEvent::Escalated { reason: reason.clone() });
+                push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Escalated { reason: reason.clone() });
                 report.status = Some(RunStatus::Escalated);
                 report.final_text = Some(reason);
-                return Ok(report);
+                return Ok(finalize_run(report, &audit));
             }
             "finish" => {
                 let outcome = verifier.verify();
-                push_emit(&mut report.events, &mut emit, RunEvent::Verify { passed: outcome.passed, output: outcome.output.clone() });
+                push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Verify { passed: outcome.passed, output: outcome.output.clone() });
                 if outcome.passed {
                     let summary = call.function.arguments.get("summary").and_then(|v| v.as_str()).unwrap_or("done").to_string();
-                    push_emit(&mut report.events, &mut emit, RunEvent::Finished { summary: summary.clone() });
+                    push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Finished { summary: summary.clone() });
                     report.status = Some(RunStatus::Done);
                     report.final_text = Some(summary);
                     report.steps = steps;
-                    return Ok(report);
+                    return Ok(finalize_run(report, &audit));
                 }
                 verify_failures += 1;
                 result = ToolResult::error("verifier failed", outcome.output.chars().take(800).collect::<String>());
                 if verify_failures >= 3 {
                     let reason = "verifier failed three times".to_string();
-                    push_emit(&mut report.events, &mut emit, RunEvent::Escalated { reason: reason.clone() });
+                    push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Escalated { reason: reason.clone() });
                     report.status = Some(RunStatus::Escalated);
                     report.final_text = Some(reason);
                     report.steps = steps;
-                    return Ok(report);
+                    return Ok(finalize_run(report, &audit));
                 }
             }
             "apply_patch" | "run_command" if allowed => {
                 let outcome = verifier.verify();
-                push_emit(&mut report.events, &mut emit, RunEvent::Verify { passed: outcome.passed, output: outcome.output.clone() });
+                push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Verify { passed: outcome.passed, output: outcome.output.clone() });
                 if outcome.passed {
-                    push_emit(&mut report.events, &mut emit, RunEvent::Finished { summary: "verifier passed".into() });
+                    push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Finished { summary: "verifier passed".into() });
                     report.status = Some(RunStatus::Done);
                     report.final_text = Some("verifier passed".into());
                     report.steps = steps;
-                    return Ok(report);
+                    return Ok(finalize_run(report, &audit));
                 }
             }
             _ => {}
@@ -355,11 +419,17 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
 
         messages.push(Message::assistant_with_tool_calls(response.text().map(|s| s.to_string()), vec![call.clone()]));
         messages.push(Message::tool_result(call.id.clone(), result.to_json()));
+
+        if let Some((before_tokens, after_tokens)) = context::maybe_compact(
+            &mut messages, &mut context_state, &ctx.root, config.context_tokens,
+        ) {
+            push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Compacted { before_tokens, after_tokens });
+        }
     }
 
     report.status = Some(RunStatus::MaxSteps);
     report.steps = steps;
-    Ok(report)
+    Ok(finalize_run(report, &audit))
 }
 
 #[cfg(test)]
@@ -400,6 +470,11 @@ mod tests {
             usage: Usage { prompt_tokens: 100, completion_tokens: 10, prompt_tokens_details: None },
             timings: Some(Timings { cache_n: 50, prompt_ms: 1.0, predicted_ms: 1.0 }),
         }
+    }
+    fn truncated_call(name: &str, arguments: Value) -> ChatResponse {
+        let mut response = call(name, arguments);
+        response.choices[0].finish_reason = Some("length".into());
+        response
     }
     fn text(text: &str) -> ChatResponse {
         ChatResponse {
@@ -465,6 +540,63 @@ mod tests {
         let report = run_agent(&transport, &config, &ctx, &verifier, Some(&approver), |_| {}).unwrap();
         assert_eq!(report.status, Some(RunStatus::Done));
         assert!(fs::read_to_string(root.join("tax.txt")).unwrap().contains("rate = 10"));
+    }
+
+    #[test]
+    fn audit_trail_has_tool_calls_and_a_report() {
+        let root = workspace("audit");
+        fs::write(root.join("tax.txt"), "rate = 8\n").unwrap();
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let transport = FakeTransport::new(vec![
+            call("submit_plan", serde_json::json!({"steps":[{"tool":"apply_patch","description":"fix"},{"tool":"finish","description":"verify"}]})),
+            call("apply_patch", serde_json::json!({"path":"tax.txt","old_string":"rate = 8","new_string":"rate = 10"})),
+        ]);
+        let verifier = FakeVerifier { passes: Cell::new(true) };
+        let config = RunConfig::new("spark-x26", "fix rate", "rate 10").with_max_steps(4);
+        let report = run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
+        assert_eq!(report.status, Some(RunStatus::Done));
+        let entries = crate::audit::AuditLog::read_all(&root);
+        let kinds: Vec<&str> = entries.iter().filter_map(|e| e.get("kind").and_then(|k| k.as_str())).collect();
+        assert!(kinds.contains(&"plan"));
+        assert!(kinds.contains(&"tool_call"));
+        assert!(kinds.contains(&"report"));
+        assert!(entries.iter().any(|e| e.get("run_id").and_then(|v| v.as_str()).is_some()));
+    }
+
+    #[test]
+    fn compaction_fires_and_writes_state() {
+        let root = workspace("compact");
+        let long_file = format!("{}\nrate = 8\n", "x".repeat(6000));
+        fs::write(root.join("tax.txt"), long_file).unwrap();
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let transport = FakeTransport::new(vec![
+            call("submit_plan", serde_json::json!({"steps":[{"tool":"read_file","description":"read the tax file carefully"},{"tool":"finish","description":"verify the result"}]})),
+            call("read_file", serde_json::json!({"path":"tax.txt"})),
+            call("finish", serde_json::json!({"summary":"done"})),
+        ]);
+        let verifier = FakeVerifier { passes: Cell::new(true) };
+        let config = RunConfig::new("spark-x26", "fix rate", "rate 10").with_max_steps(5).with_context_tokens(512);
+        let report = run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
+        assert_eq!(report.status, Some(RunStatus::Done));
+        assert!(report.events.iter().any(|e| matches!(e, RunEvent::Compacted { .. })));
+        assert!(root.join(".tinyloop").join("state.md").exists());
+    }
+
+    #[test]
+    fn truncated_tool_call_is_never_executed() {
+        let root = workspace("truncated");
+        fs::write(root.join("tax.txt"), "rate = 8\n").unwrap();
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let transport = FakeTransport::new(vec![
+            call("submit_plan", serde_json::json!({"steps":[{"tool":"apply_patch","description":"fix"},{"tool":"finish","description":"verify"}]})),
+            truncated_call("apply_patch", serde_json::json!({"path":"tax.txt","old_string":"rate = 8","new_string":"rate = 10"})),
+        ]);
+        let verifier = FakeVerifier { passes: Cell::new(true) };
+        let config = RunConfig::new("spark-x26", "fix", "rate 10").with_max_steps(2);
+        let report = run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
+        assert!(fs::read_to_string(root.join("tax.txt")).unwrap().contains("rate = 8"));
+        assert!(!report.events.iter().any(|e| matches!(e, RunEvent::ToolResult { summary, .. } if summary.contains("patched"))));
+        assert!(report.events.iter().any(|e| matches!(e, RunEvent::TextOnlyRepair { .. })));
     }
 
     #[test]

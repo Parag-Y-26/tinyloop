@@ -60,7 +60,9 @@ cd desktop && pnpm tauri dev
 
 Or launch the built binary at `desktop/src-tauri/target/release/tinyloop-tauri.exe`.
 
-**Verified against the real model:** `llama serve` build 12652, Spark-X2.6-4B Q4_K_M, 8192 ctx. Capability probe: tools visible (23 → 130 prompt tokens), native tool call parsed. End-to-end task: read `Cargo.toml` → patch `answer.txt` → verifier passed → `Done` in 4 steps, 3,924 prompt / 139 completion tokens, 3,535 cache hits.
+**Verified against the real model:** `llama serve` build 12652, Spark-X2.6-4B Q4_K_M, 8192 ctx. Capability probe: tools visible (23 → 130 prompt tokens), native tool call parsed. Eval suite: **15/15 tasks**, 4,551 tok/s prefill, 40.9 tok/s decode, 88.9% cache hits, 0 tool errors — see [`docs/EVAL_RESULTS.md`](docs/EVAL_RESULTS.md).
+
+**Installers:** MSI and NSIS builds are in `desktop/src-tauri/target/release/bundle/`.
 - [`docs/MODEL_PROFILE.md`](docs/MODEL_PROFILE.md) — exact `llama-server` command and gotchas
 - [`docs/research/INDEX.md`](docs/research/INDEX.md) — OpenClaw, DeepSeek Harness/ECC, small-model harnesses, runtime verification
 

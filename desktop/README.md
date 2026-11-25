@@ -41,7 +41,19 @@ llama serve -m Spark-X2.6-4B-Q4_K_M.gguf -a spark-x26 -c 8192 -np 1 -ngl all -fa
 
 ```bash
 pnpm build                 # tsc --noEmit + vite build — passes
-cd src-tauri && cargo check --release   # passes
+pnpm test                  # Vitest + jsdom — 2/2 pass
+cd src-tauri && cargo clippy --all-targets -- -D warnings   # clean
 ```
+
+## Installers
+
+Built with `pnpm tauri build`:
+
+- `src-tauri/target/release/bundle/msi/tinyloop_0.1.0_x64_en-US.msi` — 4.59 MiB
+- `src-tauri/target/release/bundle/nsis/tinyloop_0.1.0_x64-setup.exe` — 3.32 MiB
+
+## Eval
+
+`docs/EVAL_RESULTS.md` — 15/15 real-model tasks, 4,551 tok/s prefill, 40.9 tok/s decode, 88.9% cache hits, 0 tool errors.
 
 Icon source: `icon-src.png` (generated, rounded blue tile with a white "t"). Regenerate with `pnpm tauri icon icon-src.png`.

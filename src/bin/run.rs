@@ -30,6 +30,8 @@ fn main() {
         RunEvent::Finished { summary } => println!("FINISHED: {summary}"),
         RunEvent::Escalated { reason } => println!("ESCALATED: {reason}"),
         RunEvent::TextOnlyRepair { text } => println!("REPAIR (text only): {}", text.chars().take(120).collect::<String>()),
+        RunEvent::ApprovalRequired(request) => println!("APPROVAL: {} {}", request.tool, request.hash),
+        RunEvent::Compacted { before_tokens, after_tokens } => println!("COMPACT: {before_tokens} -> {after_tokens} tokens"),
     }).expect("run");
 
     println!("STATUS: {:?} steps={} prompt_tokens={} completion_tokens={} cache_hits={}", report.status, report.steps, report.prompt_tokens, report.completion_tokens, report.cache_hits);

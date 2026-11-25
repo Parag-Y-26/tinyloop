@@ -9,10 +9,11 @@ Control pane for the current orchestration pass. One owner at a time; every card
 | card-001 Real model capability probe | **Merged** | hermes | `src/model/`, `src/bin/probe.rs` | probe returns tools_visible + tool_call_ok |
 | card-002 Real end-to-end loop task | **Merged** | hermes | `src/loop_engine/`, `src/tools/`, `src/bin/run.rs` | verifier exits 0 on final state |
 | card-003 Approval flow (`approve`/`deny`/`cancel_run`) | **Merged** | hermes | `desktop/src-tauri/src/main.rs`, `desktop/src/App.tsx`, `src/loop_engine/` | Ask-mode patch blocks until approval; deny leaves file untouched |
-| card-004 Audit JSONL | **Backlog** | — | `src/audit.rs` | every tool call + approval + token count appended and replayable |
-| card-005 Context manager + compaction | **Backlog** | — | `src/context.rs` | 85% trigger, state.md written first, exact recent tail kept |
-| card-006 Eval suite + metrics | **Backlog** | — | `tests/eval/` | 5 smoke + 10 full tasks; final-state grading, tool validity separate |
-| card-007 Installer | **Backlog** | — | `desktop/src-tauri/tauri.conf.json` | NSIS installer builds and launches |
+| card-004 Audit JSONL | **Merged** | hermes | `src/audit.rs`, `src/loop_engine/` | every tool call + approval + token count appended and replayable |
+| card-005 Context manager + compaction | **Merged** | hermes | `src/context.rs`, `src/loop_engine/` | 85% trigger, state.md written first, exact recent tail kept |
+| card-006 Eval suite + metrics | **Merged** | hermes | `tests/eval/`, `src/bin/eval.rs` | 15/15 tasks, final-state grading, tool validity separate |
+| card-007 Installer | **Merged** | hermes | `desktop/src-tauri/tauri.conf.json` | MSI + NSIS installers build |
+| card-008 UI click-through harness | **Ready** | hermes | `desktop/src/App.test.tsx` | Vitest covers clarify + theme; real-window Allow/Deny still pending |
 
 ## card-001 — Real model capability probe
 
@@ -35,12 +36,35 @@ Control pane for the current orchestration pass. One owner at a time; every card
 - **Wiring**: core emits `ApprovalRequired`, `TauriApprover` blocks on a channel, UI `approve`/`deny` resolves by id, `cancel_run` flips an `AtomicBool` checked each loop turn.
 - **Caveat**: the UI click-through has not been automated inside the WebView; core behavior is tested, window launches and responds.
 
+## card-004 — Audit
+
+- **Evidence**: `cargo test --lib` includes `audit_trail_has_tool_calls_and_a_report`; `.tinyloop/audit.jsonl` contains `plan`, `tool_call`, `tool_result`, `verify`, `report` entries with run id, tokens, cache hits, and tool errors.
+- **Gate**: passed.
+
+## card-005 — Context + compaction
+
+- **Evidence**: `context::tests` (system + exact tail preserved, 85% threshold, bounded state) and `compaction_fires_and_writes_state` engine test.
+- **Gate**: passed.
+
+## card-006 — Eval suite
+
+- **Evidence**: `docs/EVAL_RESULTS.md` — **15/15 passed**, average 3 steps, 4,551 tok/s prefill, 40.9 tok/s decode, 88.9% cache hit, 0 tool errors.
+- **Gate**: passed.
+
+## card-007 — Installer
+
+- **Evidence**: `tinyloop_0.1.0_x64_en-US.msi` (4.59 MiB) and `tinyloop_0.1.0_x64-setup.exe` (3.32 MiB).
+- **Gate**: passed.
+
 ## Blockers
 
 | Blocker | Owner | Next action |
 |---|---|---|
-| Installer not built | — | card-007: enable `bundle.active`, run `pnpm tauri build` |
-| UI click-through automation | — | card-008: drive the WebView or add a headless Tauri test harness |
+| Real-window Allow/Deny not click-tested | hermes | card-008: add `tauri-driver` + matching Edge WebDriver, or a Tauri mock-runtime test |
+
+## UI tests
+
+`desktop/src/App.test.tsx` — Vitest + jsdom: clarify modal is required before a run; appearance toggle works. 2/2 pass.
 
 ## Notes
 

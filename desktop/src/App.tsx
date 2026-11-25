@@ -28,6 +28,10 @@ export default function App() {
   const [workspace, setWorkspace] = useState('C:/Users/parag/Downloads/tinyloop');
   const [verifyCommand, setVerifyCommand] = useState('cargo test --lib');
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
+  const [doneCondition, setDoneCondition] = useState('the verifier command exits 0');
+  const [boundariesText, setBoundariesText] = useState('do not edit test files\nstay inside the workspace\nno network');
+  const [clarifyOpen, setClarifyOpen] = useState(false);
+  const [clarified, setClarified] = useState(false);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -71,7 +75,7 @@ export default function App() {
 
   const add = (s: Omit<Step, 'id'>) => setSteps(prev => [...prev, { ...s, id: Date.now() + Math.random() }]);
 
-  const run = async () => {
+  const executeRun = async () => {
     if (running) return;
     setRunning(true);
     const text = composer.trim() || 'Run sample: repo tax investigation';
@@ -81,8 +85,8 @@ export default function App() {
         const { invoke } = await import('@tauri-apps/api/core');
         const report = await invoke<{ status?: string; steps: number; prompt_tokens: number; completion_tokens: number; cache_hits: number }>('run_task', {
           task: text,
-          doneCondition: 'the verifier command exits 0',
-          boundaries: ['do not edit test files', 'stay inside the workspace', 'no network'],
+          doneCondition,
+          boundaries: boundariesText.split('\n').map(s => s.trim()).filter(Boolean),
           verifyCommand,
           cwd: workspace,
           mode,
@@ -127,6 +131,12 @@ export default function App() {
     setRunning(false);
   };
 
+  const run = () => {
+    if (running) return;
+    if (!clarified) { setClarifyOpen(true); return; }
+    void executeRun();
+  };
+
   const mark = (s: Status) => s === 'done' ? '✓' : s === 'running' ? '⟳' : s === 'blocked' ? '!' : '·';
 
   return (
@@ -151,7 +161,7 @@ export default function App() {
             {sessions.map((s, i) => <button className="session" aria-selected={i === 0} key={s}>
               <span className="s-icon">{i + 1}</span><span><span className="s-title">{s}</span><span className="s-meta">bounded loop</span></span>
             </button>)}</div>
-          <button className="new-btn" onClick={() => setPalette(true)}>＋ New task</button>
+          <button className="new-btn" onClick={() => { setClarified(false); setClarifyOpen(true); }}>＋ New task</button>
           <div className="side-foot"><div className="side-label">Model</div>
             <div className="metric"><span>Cache hits</span><b>{cache}</b></div>
             <div className="metric"><span>Context</span><b>8192</b></div>
@@ -197,6 +207,18 @@ export default function App() {
           </div>
         </aside>
       </div>
+
+      {clarifyOpen && <div className="palette open" onClick={() => setClarifyOpen(false)}><div className="pbox clarify" onClick={e => e.stopPropagation()}>
+        <h3>Confirm the goal</h3>
+        <label className="k">Done when</label>
+        <textarea className="clarify-input" rows={3} value={doneCondition} onChange={e => setDoneCondition(e.target.value)} />
+        <label className="k">Boundaries — one per line</label>
+        <textarea className="clarify-input" rows={4} value={boundariesText} onChange={e => setBoundariesText(e.target.value)} />
+        <div className="actions">
+          <button className="btn quiet" onClick={() => setClarifyOpen(false)}>Cancel</button>
+          <button className="btn primary" onClick={() => { setClarified(true); setClarifyOpen(false); void executeRun(); }}>Confirm &amp; Run</button>
+        </div>
+      </div></div>}
 
       {palette && <div className="palette open" onClick={() => setPalette(false)}><div className="pbox" onClick={e => e.stopPropagation()}>
         <input placeholder="Type a command…" autoFocus aria-label="Command"/>

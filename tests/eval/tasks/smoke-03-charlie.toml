@@ -1,0 +1,12 @@
+id = "smoke-03-charlie"
+goal = "Read answer.txt. Replace the text TODO with the exact token charlie. Then call finish. Do not change other files."
+done_condition = "answer.txt contains charlie"
+boundaries = ["do not edit other files", "stay inside the workspace"]
+max_steps = 6
+
+[[fixture]]
+path = "answer.txt"
+content = "TODO\n"
+
+[verify]
+command = "findstr /C:\"charlie\" answer.txt"
