@@ -1,0 +1,346 @@
+<!doctype html>
+<html lang="en" data-theme="light" data-density="regular">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tinyloop — desktop prototype</title>
+<style>
+:root{
+  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+  --bg:#f2f2f7; --surface:rgba(255,255,255,.74); --sidebar:rgba(248,248,251,.82);
+  --card:rgba(255,255,255,.66); --ink:#1d1d1f; --muted:#6e6e73; --faint:#8e8e93;
+  --border:rgba(0,0,0,.09); --border-strong:rgba(0,0,0,.14);
+  --accent:#0a84ff; --accent-soft:rgba(10,132,255,.11);
+  --green:#2fae4b; --amber:#d98316; --red:#d9433c; --shadow:0 30px 80px rgba(0,0,0,.22),0 2px 10px rgba(0,0,0,.08);
+  --r-window:14px; --r-card:12px; --r-control:9px; --spring:cubic-bezier(.32,.72,0,1);
+}
+html[data-theme="dark"]{
+  --bg:#1c1c1e; --surface:rgba(44,44,48,.76); --sidebar:rgba(32,32,35,.84);
+  --card:rgba(58,58,62,.58); --ink:#f5f5f7; --muted:#a1a1a6; --faint:#8e8e93;
+  --border:rgba(255,255,255,.1); --border-strong:rgba(255,255,255,.16);
+  --accent:#0a84ff; --accent-soft:rgba(10,132,255,.18);
+  --green:#30d158; --amber:#ff9f0a; --red:#ff453a; --shadow:0 30px 90px rgba(0,0,0,.5),0 2px 12px rgba(0,0,0,.3);
+}
+html[data-density="compact"]{--r-card:9px;--r-control:7px}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%}
+html{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
+body{font-family:var(--font);color:var(--ink);background:#17181c;overflow:hidden}
+button,input,textarea{font:inherit;color:inherit}
+button{cursor:pointer;border:0;background:none}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px;border-radius:6px}
+
+/* Desk backdrop: quiet, not a product surface. */
+.desk{height:100%;display:grid;place-items:center;padding:30px;position:relative;overflow:hidden;
+  background:radial-gradient(1100px 700px at 22% 18%,#2b3444 0%,transparent 62%),
+             radial-gradient(900px 620px at 82% 84%,#30323b 0%,transparent 60%),#17181c}
+.desk::after{content:"";position:absolute;inset:0;pointer-events:none;opacity:.14;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E")}
+
+.window{position:relative;width:min(1460px,100%);height:min(920px,calc(100vh - 60px));display:grid;grid-template-rows:54px minmax(0,1fr);
+  background:var(--bg);border:1px solid rgba(255,255,255,.35);border-radius:var(--r-window);box-shadow:var(--shadow);overflow:hidden;z-index:1}
+
+/* Title bar */
+.titlebar{display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--surface);
+  backdrop-filter:blur(28px) saturate(180%);-webkit-backdrop-filter:blur(28px) saturate(180%);
+  border-bottom:1px solid var(--border);min-width:0}
+.traffic{display:flex;gap:8px;flex:none}
+.dot{width:12px;height:12px;border-radius:50%;box-shadow:inset 0 0 0 .5px rgba(0,0,0,.12)}
+.dot.r{background:#ff5f57}.dot.y{background:#febc2e}.dot.g{background:#28c840}
+.brand{font-weight:600;letter-spacing:-.01em;font-size:14px;display:flex;align-items:center;gap:9px;flex:none}
+.glyph{width:20px;height:20px;border-radius:6px;background:var(--ink);color:var(--bg);display:grid;place-items:center;font-size:12px;font-weight:700}
+.badge{font-size:10px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:3px 8px;flex:none}
+.spacer{flex:1}
+.segmented{display:flex;padding:3px;gap:2px;background:rgba(120,120,128,.12);border-radius:var(--r-control);flex:none}
+.segmented button{font-size:12px;padding:6px 12px;border-radius:7px;color:var(--muted);min-height:30px;transition:background .18s var(--spring),color .18s var(--spring),box-shadow .18s var(--spring)}
+.segmented button[aria-pressed="true"]{background:var(--card);color:var(--ink);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.pill{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:6px 11px;background:var(--card);white-space:nowrap;flex:none}
+.live{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 0 3px color-mix(in srgb,var(--green) 18%,transparent)}
+.icon-btn{width:34px;height:34px;display:grid;place-items:center;border-radius:var(--r-control);color:var(--muted);border:1px solid transparent;transition:background .15s,color .15s,border-color .15s}
+.icon-btn:hover{background:var(--card);border-color:var(--border);color:var(--ink)}
+.run-btn{display:flex;align-items:center;gap:7px;background:var(--accent);color:#fff;font-size:12px;font-weight:600;padding:8px 14px;border-radius:var(--r-control);min-height:34px;
+  box-shadow:0 1px 2px rgba(0,0,0,.18),inset 0 1px 0 rgba(255,255,255,.22);transition:transform .14s var(--spring),filter .14s}
+.run-btn:hover{filter:brightness(1.06)}.run-btn:active{transform:scale(.96)}.run-btn[disabled]{opacity:.55;cursor:wait}
+
+/* Three-column body */
+.body{display:grid;grid-template-columns:222px minmax(0,1fr) 292px;min-height:0}
+.sidebar{background:var(--sidebar);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-right:1px solid var(--border);
+  padding:18px 12px 14px;display:flex;flex-direction:column;gap:16px;min-height:0}
+.side-label{font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);padding:0 8px;margin-bottom:8px}
+.session{width:100%;text-align:left;padding:9px 10px;border-radius:var(--r-control);display:flex;gap:9px;align-items:flex-start;min-height:44px;transition:background .16s,transform .16s var(--spring)}
+.session:hover{background:var(--card)}
+.session[aria-selected="true"]{background:var(--card);box-shadow:inset 0 0 0 1px var(--border)}
+.session .s-icon{width:20px;height:20px;border-radius:6px;background:var(--accent-soft);color:var(--accent);display:grid;place-items:center;font-size:11px;flex:none;margin-top:1px}
+.session .s-title{font-size:12.5px;font-weight:550;line-height:1.3;text-wrap:pretty}
+.session .s-meta{font-size:11px;color:var(--faint);margin-top:3px;font-variant-numeric:tabular-nums}
+.side-foot{margin-top:auto;border-top:1px solid var(--border);padding:14px 8px 0}
+.metric{display:flex;justify-content:space-between;align-items:center;font-size:11.5px;color:var(--muted);padding:3px 0}
+.metric b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+.new-btn{width:100%;min-height:40px;border:1px dashed var(--border-strong);border-radius:var(--r-control);color:var(--muted);font-size:12px;font-weight:550;
+  display:flex;align-items:center;justify-content:center;gap:6px;transition:background .16s,border-color .16s,transform .14s var(--spring)}
+.new-btn:hover{background:var(--card);border-color:var(--accent);color:var(--ink)}
+.new-btn:active{transform:scale(.98)}
+
+/* Center */
+.main{display:grid;grid-template-rows:auto minmax(0,1fr) auto;min-width:0;min-height:0}
+.main-head{padding:22px 30px 14px;border-bottom:1px solid var(--border)}
+.crumb{font-size:11px;color:var(--faint);margin-bottom:7px}
+h1{font-size:21px;letter-spacing:-.025em;margin:0;font-weight:650;line-height:1.25;text-wrap:balance}
+.sub{font-size:12px;color:var(--muted);margin-top:6px;text-wrap:pretty}
+.timeline{overflow:auto;padding:20px 30px 28px;scrollbar-width:thin;display:flex;flex-direction:column;gap:10px}
+.timeline::-webkit-scrollbar{width:8px}.timeline::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:8px}
+.step{display:grid;grid-template-columns:26px minmax(0,1fr) auto;gap:12px;align-items:start;padding:12px 14px;border-radius:var(--r-card);
+  background:var(--card);border:1px solid var(--border);animation:rise .26s var(--spring) both}
+.step .mark{width:22px;height:22px;border-radius:7px;display:grid;place-items:center;font-size:11px;font-weight:700;background:var(--card);border:1px solid var(--border);color:var(--muted)}
+.step.done .mark{color:var(--green);border-color:color-mix(in srgb,var(--green) 35%,transparent);background:color-mix(in srgb,var(--green) 10%,transparent)}
+.step.running .mark{color:var(--accent);border-color:color-mix(in srgb,var(--accent) 40%,transparent);background:var(--accent-soft)}
+.step.blocked .mark{color:var(--red);border-color:color-mix(in srgb,var(--red) 35%,transparent);background:color-mix(in srgb,var(--red) 10%,transparent)}
+.step.running .mark::after{content:"";position:absolute;width:22px;height:22px;border-radius:7px;border:1px solid var(--accent);opacity:0;animation:ring 1.8s ease-out infinite}
+.step .s-title{font-size:13px;font-weight:560}
+.step .s-detail{font-family:var(--mono);font-size:11.5px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}
+.step .s-meta{font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums;white-space:nowrap;padding-top:2px}
+.user-msg{justify-self:end;max-width:78%;background:var(--accent);color:#fff;border-radius:14px 14px 4px 14px;padding:10px 14px;font-size:12.5px;line-height:1.45;animation:rise .26s var(--spring) both;box-shadow:0 2px 6px rgba(0,0,0,.12)}
+.composer{padding:14px 30px 20px;border-top:1px solid var(--border);background:var(--surface);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px)}
+.field{display:flex;align-items:flex-end;gap:10px;border:1px solid var(--border-strong);border-radius:var(--r-card);background:var(--card);padding:8px 8px 8px 14px;min-height:56px;transition:border-color .18s,box-shadow .18s}
+.field:focus-within{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-soft)}
+textarea{resize:none;border:0;outline:0;background:none;flex:1;min-height:38px;max-height:100px;line-height:1.45;font-size:13px;padding:8px 0}
+textarea::placeholder{color:var(--faint)}
+.send{width:38px;height:38px;border-radius:9px;background:var(--ink);color:var(--bg);display:grid;place-items:center;font-size:15px;transition:transform .14s var(--spring),opacity .14s}
+.send:hover{opacity:.86}.send:active{transform:scale(.94)}
+.hint{font-size:10.5px;color:var(--faint);margin-top:8px;display:flex;gap:12px}
+kbd{font-family:var(--mono);font-size:10px;border:1px solid var(--border);border-bottom-width:2px;border-radius:4px;padding:1px 5px;background:var(--card);color:var(--muted)}
+
+/* Inspector */
+.inspector{background:var(--sidebar);backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);border-left:1px solid var(--border);padding:20px 18px;overflow:auto;min-height:0}
+.section{margin-bottom:20px}
+.section h2{font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--faint);margin:0 0 9px;font-weight:650}
+.contract{border:1px solid var(--border);border-radius:var(--r-card);background:var(--card);padding:13px}
+.contract p{margin:0 0 8px;font-size:12px;line-height:1.5;color:var(--ink)}
+.contract p:last-child{margin-bottom:0}
+.contract .k{font-size:10px;font-weight:650;letter-spacing:.04em;text-transform:uppercase;color:var(--faint);display:block;margin-bottom:4px}
+.contract code{font-family:var(--mono);font-size:11px;color:var(--muted)}
+.divider{height:1px;background:var(--border);margin:20px 0}
+.approval{border:1px solid color-mix(in srgb,var(--amber) 42%,var(--border));border-radius:var(--r-card);background:color-mix(in srgb,var(--amber) 7%,var(--card));padding:14px;animation:rise .3s var(--spring) both}
+.approval .head{display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:600}
+.approval .dot2{width:7px;height:7px;border-radius:50%;background:var(--amber);box-shadow:0 0 0 3px color-mix(in srgb,var(--amber) 18%,transparent)}
+.approval .cmd{font-family:var(--mono);font-size:11px;color:var(--muted);margin:10px 0 4px;overflow-wrap:anywhere}
+.approval .hash{font-family:var(--mono);font-size:10px;color:var(--faint)}
+.actions{display:flex;gap:8px;margin-top:14px}
+.btn{min-height:36px;flex:1;border-radius:var(--r-control);font-size:12px;font-weight:600;transition:transform .14s var(--spring),filter .14s,background .14s}
+.btn:active{transform:scale(.96)}
+.btn.primary{background:var(--accent);color:#fff}.btn.primary:hover{filter:brightness(1.06)}
+.btn.quiet{border:1px solid var(--border-strong);background:var(--card);color:var(--ink)}.btn.quiet:hover{background:var(--bg)}
+.resolved{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:8px;animation:rise .24s var(--spring) both}
+.resolved .ok{color:var(--green);font-weight:700}
+
+/* Overlays */
+.toast{position:absolute;left:50%;bottom:22px;transform:translate(-50%,14px);background:var(--ink);color:var(--bg);font-size:12px;padding:9px 14px;border-radius:999px;opacity:0;pointer-events:none;transition:opacity .2s,transform .28s var(--spring);z-index:5;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+.palette{position:absolute;inset:0;background:rgba(0,0,0,.26);backdrop-filter:blur(3px);display:none;place-items:start center;padding-top:16vh;z-index:6}
+.palette.open{display:grid;animation:fade .16s ease both}
+.pbox{width:min(520px,90%);background:var(--surface);backdrop-filter:blur(30px) saturate(180%);border:1px solid var(--border-strong);border-radius:14px;box-shadow:var(--shadow);overflow:hidden;animation:rise .24s var(--spring) both}
+.pbox input{width:100%;border:0;outline:0;background:none;padding:16px 18px;font-size:14px;border-bottom:1px solid var(--border)}
+.pitem{width:100%;text-align:left;padding:12px 18px;font-size:12.5px;display:flex;justify-content:space-between;gap:12px}
+.pitem:hover,.pitem:focus{background:var(--accent-soft)}
+.pitem span:last-child{color:var(--faint);font-family:var(--mono);font-size:10.5px}
+.tweaks{position:absolute;top:48px;right:14px;width:210px;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--r-card);box-shadow:var(--shadow);padding:12px;display:none;z-index:7;backdrop-filter:blur(26px)}
+.tweaks.open{display:block;animation:rise .2s var(--spring) both}
+.tweaks h3{margin:0 0 10px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--faint)}
+.trow{display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:6px 0}
+.trow button{border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:11px;background:var(--card)}
+.trow button[aria-pressed="true"]{background:var(--accent);color:#fff;border-color:var(--accent)}
+
+@keyframes rise{from{opacity:0;transform:translateY(8px);filter:blur(3px)}to{opacity:1;transform:none;filter:none}}
+@keyframes fade{from{opacity:0}to{opacity:1}}
+@keyframes ring{0%{transform:scale(1);opacity:.55}100%{transform:scale(1.5);opacity:0}}
+@media (prefers-reduced-motion:reduce){*{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
+html[data-motion="off"] *{animation-duration:.001ms!important;transition-duration:.001ms!important}
+@media(max-width:1150px){.body{grid-template-columns:190px minmax(0,1fr)}.inspector{display:none}}
+@media(max-width:760px){.body{grid-template-columns:minmax(0,1fr)}.sidebar{display:none}.badge,.pill{display:none}.titlebar{gap:8px}.timeline,.main-head,.composer{padding-left:18px;padding-right:18px}}
+</style>
+</head>
+<body>
+<div class="desk">
+  <div class="window" id="app">
+    <div class="titlebar">
+      <div class="traffic"><i class="dot r"></i><i class="dot y"></i><i class="dot g"></i></div>
+      <div class="brand"><span class="glyph">t</span>tinyloop</div>
+      <span class="badge">UI prototype</span>
+      <div class="spacer"></div>
+      <div class="segmented" id="modes">
+        <button data-mode="ask" aria-pressed="true">Ask</button>
+        <button data-mode="auto" aria-pressed="false">Auto</button>
+        <button data-mode="dry" aria-pressed="false">Dry run</button>
+      </div>
+      <div class="pill"><i class="live"></i>Spark X2.6 · 4B · 8K</div>
+      <button class="icon-btn" id="tweakBtn" title="Tweaks" aria-label="Tweaks">⌘</button>
+      <button class="icon-btn" id="themeBtn" title="Toggle appearance" aria-label="Toggle appearance">◐</button>
+      <button class="run-btn" id="runBtn">▶ Run</button>
+    </div>
+
+    <div class="tweaks" id="tweaks">
+      <h3>Tweaks</h3>
+      <div class="trow"><span>Appearance</span><button id="tTheme">Light</button></div>
+      <div class="trow"><span>Density</span><button id="tDensity">Regular</button></div>
+      <div class="trow"><span>Motion</span><button id="tMotion" aria-pressed="true">On</button></div>
+    </div>
+
+    <div class="body">
+      <aside class="sidebar">
+        <div>
+          <div class="side-label">Sessions</div>
+          <div id="sessions"></div>
+        </div>
+        <button class="new-btn" id="newTask">＋ New task</button>
+        <div class="side-foot">
+          <div class="side-label">Model</div>
+          <div class="metric"><span>Decode</span><b id="rate">30 tok/s</b></div>
+          <div class="metric"><span>Cache hits</span><b id="cache">0</b></div>
+          <div class="metric"><span>Context</span><b>8192</b></div>
+        </div>
+      </aside>
+
+      <main class="main">
+        <div class="main-head">
+          <div class="crumb">Sessions / <span id="crumb">tax calculation</span></div>
+          <h1 id="taskTitle">Find why calc_total uses 8% tax</h1>
+          <div class="sub">Bounded loop · one tool call per turn · deterministic verifier</div>
+        </div>
+        <div class="timeline" id="timeline"></div>
+        <div class="composer">
+          <div class="field">
+            <textarea id="composer" rows="1" placeholder="Describe a task for the agent…"></textarea>
+            <button class="send" id="sendBtn" title="Send" aria-label="Send">↑</button>
+          </div>
+          <div class="hint"><span><kbd>↵</kbd> send</span><span><kbd>⇧↵</kbd> newline</span><span><kbd>⌘K</kbd> commands</span></div>
+        </div>
+      </main>
+
+      <aside class="inspector">
+        <div class="section">
+          <h2>Goal</h2>
+          <div class="contract"><p><span class="k">Done when</span><code>cargo test</code> exits 0 and <code>src/tax.rs</code> contains <code>fn calc_total</code></p></div>
+        </div>
+        <div class="section">
+          <h2>Boundaries</h2>
+          <div class="contract"><p><span class="k">Must not</span>edit test files, change anything outside <code>src/</code>, or touch the network.</p></div>
+        </div>
+        <div class="section">
+          <h2>Verifier</h2>
+          <div class="contract"><p><code>cargo test --quiet</code><br><span class="k" style="margin-top:8px">Attempts</span><code>0 / 3</code> · judge is Rust, not the model</p></div>
+        </div>
+        <div class="divider"></div>
+        <div class="section">
+          <h2>Approval</h2>
+          <div id="approval"></div>
+        </div>
+      </aside>
+    </div>
+
+    <div class="toast" id="toast"></div>
+    <div class="palette" id="palette">
+      <div class="pbox">
+        <input id="paletteInput" placeholder="Type a command…" aria-label="Command">
+        <button class="pitem" data-act="new"><span>New task</span><span>⌘N</span></button>
+        <button class="pitem" data-act="theme"><span>Toggle appearance</span><span>⌘D</span></button>
+        <button class="pitem" data-act="dry"><span>Dry-run mode</span><span>⌘⇧D</span></button>
+        <button class="pitem" data-act="sample"><span>Run sample task</span><span>↵</span></button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const app=document.getElementById('app'),tl=document.getElementById('timeline');
+  const composer=document.getElementById('composer'),toast=document.getElementById('toast');
+  const approval=document.getElementById('approval'),palette=document.getElementById('palette');
+  let running=false,mode='ask',cache=0;
+  const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+  const prefs=JSON.parse(store.get('tinyloop-ui')||'{}');
+  if(prefs.theme)document.documentElement.dataset.theme=prefs.theme;
+  if(prefs.density)document.documentElement.dataset.density=prefs.density;
+  if(prefs.motion==='off')document.documentElement.dataset.motion='off';
+  function save(){store.set('tinyloop-ui',JSON.stringify({
+    theme:document.documentElement.dataset.theme,density:document.documentElement.dataset.density,motion:document.documentElement.dataset.motion||'on'}));}
+  function notify(msg){toast.textContent=msg;toast.classList.add('show');clearTimeout(notify.t);notify.t=setTimeout(()=>toast.classList.remove('show'),1800);}
+  const sessions=[
+    {t:'Tax calculation',m:'12 steps · verified',on:true},
+    {t:'Report CSV cleanup',m:'8 steps · verified'},
+    {t:'Audit dependency tree',m:'escalated'}
+  ];
+  function renderSessions(){const box=document.getElementById('sessions');box.innerHTML='';
+    sessions.forEach((s,i)=>{const b=document.createElement('button');b.className='session';b.setAttribute('aria-selected',!!s.on);
+      b.innerHTML='<span class="s-icon">'+(i+1)+'</span><span><span class="s-title">'+s.t+'</span><span class="s-meta">'+s.m+'</span></span>';
+      b.onclick=()=>{sessions.forEach(x=>x.on=false);s.on=true;renderSessions();document.getElementById('taskTitle').textContent=s.t;document.getElementById('crumb').textContent=s.t.toLowerCase();notify('Session opened: '+s.t)};
+      box.appendChild(b);});}
+  renderSessions();
+  function step(title,detail,status,meta){
+    const d=document.createElement('div');d.className='step '+status;
+    const mark=status==='done'?'✓':status==='running'?'⟳':status==='blocked'?'!':'·';
+    d.innerHTML='<div class="mark">'+mark+'</div><div><div class="s-title">'+title+'</div><div class="s-detail">'+detail+'</div></div><div class="s-meta">'+(meta||'')+'</div>';
+    tl.appendChild(d);tl.scrollTop=tl.scrollHeight;return d;}
+  function userMsg(text){const d=document.createElement('div');d.className='user-msg';d.textContent=text;tl.appendChild(d);tl.scrollTop=tl.scrollHeight;}
+  function setApproval(state){
+    if(state==='pending'){
+      approval.innerHTML='<div class="approval"><div class="head"><i class="dot2"></i>Approval required</div><div class="cmd">apply_patch src/tax.rs</div><div class="hash">bound to sha256:9f2a…c41d</div><div class="actions"><button class="btn primary" id="allowBtn">Allow</button><button class="btn quiet" id="denyBtn">Deny</button></div></div>';
+      document.getElementById('allowBtn').onclick=()=>{setApproval('allowed');step('Approval granted','apply_patch src/tax.rs · hash bound','done','user');notify('Approved — patch staged');};
+      document.getElementById('denyBtn').onclick=()=>{setApproval('denied');step('Approval denied','no side effects began','blocked','user');notify('Denied — no changes made');};
+    }else if(state==='allowed'){approval.innerHTML='<div class="resolved"><span class="ok">✓</span> Approved and bound to this action</div>';}
+    else{approval.innerHTML='<div class="resolved"><span class="ok">×</span> Denied — agent was notified</div>';}
+  }
+  setApproval('pending');
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  async function run(text){
+    if(running)return;running=true;document.getElementById('runBtn').disabled=true;
+    const title=text||'Run sample: repo tax investigation';
+    userMsg(title);document.getElementById('taskTitle').textContent=title;document.getElementById('crumb').textContent='current run';
+    const a=step('Plan','submit_plan(3 steps) · Rust validated','done','0.4s');
+    await wait(360);const b=step('Act','read_file src/tax.rs offset=0 limit=120','done','182 tok');
+    await wait(420);const c=step('Act','search_files pattern="8%" path=src','running','…');
+    await wait(620);c.className='step done';c.querySelector('.mark').textContent='✓';c.querySelector('.s-meta').textContent='46 tok';
+    cache+=2;document.getElementById('cache').textContent=cache;
+    await wait(280);step('Verify','cargo test --quiet · independent judge','running','…');
+    await wait(700);const vstep=tl.querySelector('.step.running');
+    if(vstep){vstep.className='step done';const vm=vstep.querySelector('.mark');if(vm)vm.textContent='✓';}
+    step('Done','tests green · boundaries intact','done','verified');
+    setApproval('allowed');composer.value='';running=false;document.getElementById('runBtn').disabled=false;
+    notify('Run complete — deterministic verifier passed');
+  }
+  document.getElementById('runBtn').onclick=()=>run(composer.value.trim());
+  document.getElementById('sendBtn').onclick=()=>run(composer.value.trim());
+  composer.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();run(composer.value.trim());}});
+  document.getElementById('newTask').onclick=()=>{composer.focus();notify('New task — describe what the agent should do');};
+  document.querySelectorAll('#modes button').forEach(b=>b.onclick=()=>{
+    mode=b.dataset.mode;document.querySelectorAll('#modes button').forEach(x=>x.setAttribute('aria-pressed',String(x===b)));
+    notify('Mode: '+b.textContent+(mode==='dry'?' — actions previewed only':''));});
+  function toggleTheme(){const d=document.documentElement;d.dataset.theme=d.dataset.theme==='dark'?'light':'dark';save();
+    document.getElementById('tTheme').textContent=d.dataset.theme==='dark'?'Dark':'Light';notify('Appearance: '+d.dataset.theme);}
+  document.getElementById('themeBtn').onclick=toggleTheme;
+  document.getElementById('tTheme').onclick=toggleTheme;
+  document.getElementById('tDensity').onclick=()=>{const d=document.documentElement;d.dataset.density=d.dataset.density==='compact'?'regular':'compact';save();
+    document.getElementById('tDensity').textContent=d.dataset.density==='compact'?'Compact':'Regular';};
+  document.getElementById('tMotion').onclick=e=>{const d=document.documentElement;const off=d.dataset.motion==='off';delete d.dataset.motion;if(!off)d.dataset.motion='off';save();
+    e.currentTarget.setAttribute('aria-pressed',String(!off));e.currentTarget.textContent=off?'On':'Off';};
+  document.getElementById('tweakBtn').onclick=()=>document.getElementById('tweaks').classList.toggle('open');
+  function openPalette(open){palette.classList.toggle('open',open);if(open)document.getElementById('paletteInput').focus();}
+  document.addEventListener('keydown',e=>{
+    if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openPalette(!palette.classList.contains('open'));}
+    if(e.key==='Escape'){openPalette(false);document.getElementById('tweaks').classList.remove('open');}
+    if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='d'){e.preventDefault();toggleTheme();}
+  });
+  palette.addEventListener('click',e=>{if(e.target===palette)openPalette(false);});
+  document.querySelectorAll('.pitem').forEach(item=>item.onclick=()=>{
+    const a=item.dataset.act;openPalette(false);
+    if(a==='new')document.getElementById('newTask').click();
+    if(a==='theme')toggleTheme();
+    if(a==='dry')document.querySelector('[data-mode="dry"]').click();
+    if(a==='sample')run('Explain the repo and list the next three steps');
+  });
+  step('Plan','submit_plan(3 steps) · Rust validated','done','0.4s');
+  step('Act','read_file src/tax.rs offset=0 limit=120','done','182 tok');
+})();
+</script>
+</body>
+</html>

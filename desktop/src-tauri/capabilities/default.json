@@ -1,0 +1,5 @@
+{
+  "identifier": "default",
+  "description": "Minimal permissions for the tinyloop window",
+  "permissions": ["core:default", "core:window:allow-start-dragging"]
+}

@@ -1,0 +1,8 @@
+target/
+desktop/target/
+desktop/src-tauri/target/
+desktop/node_modules/
+desktop/dist/
+.tinyloop/
+*.log
+__pycache__/
