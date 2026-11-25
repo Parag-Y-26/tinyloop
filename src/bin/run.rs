@@ -22,7 +22,7 @@ fn main() {
     if let Some(cmd) = verify { config = config.with_verifier(cmd); }
 
     println!("model={model} cwd={cwd} max_steps={max_steps}");
-    let report = run_agent(&transport, &config, &ctx, &verifier, |event| match event {
+    let report = run_agent(&transport, &config, &ctx, &verifier, Some(&tinyloop_core::loop_engine::AutoApprover), |event| match event {
         RunEvent::Plan(steps) => println!("PLAN: {}", steps.join(" | ")),
         RunEvent::ToolCall { name, args } => println!("CALL {name} {}", args),
         RunEvent::ToolResult { status, summary } => println!("  -> {status}: {summary}"),

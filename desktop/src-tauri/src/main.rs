@@ -1,12 +1,54 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::Serialize;
-use tauri::Emitter;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
+use tauri::{Emitter, State};
 use tinyloop_core::loop_engine::{
-    run_agent, AnyVerifier, CommandVerifier, NeverVerifier, RunConfig, RunEvent, RunReport, RunStatus,
+    run_agent, AnyVerifier, ApprovalDecision, ApprovalRequest, Approver, CommandVerifier,
+    NeverVerifier, RunConfig, RunEvent, RunReport, RunStatus,
 };
 use tinyloop_core::model::{run_startup_probe, LlamaCppClient};
 use tinyloop_core::tools::{RunMode, ToolContext};
+
+#[derive(Default)]
+struct ApprovalRegistry {
+    pending: Mutex<HashMap<String, mpsc::Sender<ApprovalDecision>>>,
+}
+
+impl ApprovalRegistry {
+    fn resolve(&self, id: &str, decision: ApprovalDecision) -> bool {
+        let sender = self.pending.lock().ok().and_then(|mut map| map.remove(id));
+        match sender {
+            Some(tx) => tx.send(decision).is_ok(),
+            None => false,
+        }
+    }
+}
+
+#[derive(Default)]
+struct AppState {
+    approvals: ApprovalRegistry,
+    cancel: Arc<AtomicBool>,
+}
+
+struct TauriApprover {
+    app: tauri::AppHandle,
+    state: Arc<AppState>,
+}
+
+impl Approver for TauriApprover {
+    fn request(&self, request: &ApprovalRequest) -> ApprovalDecision {
+        let (tx, rx) = mpsc::channel();
+        if let Ok(mut map) = self.state.approvals.pending.lock() {
+            map.insert(request.id.clone(), tx);
+        }
+        let _ = self.app.emit("approval_required", request.clone());
+        rx.recv_timeout(Duration::from_secs(300)).unwrap_or(ApprovalDecision::Deny)
+    }
+}
 
 #[derive(Clone, Serialize)]
 struct UiEvent {
@@ -50,6 +92,11 @@ fn ui_event(event: &RunEvent) -> UiEvent {
         RunEvent::TextOnlyRepair { text } => UiEvent {
             kind: "repair".into(), title: "Repair".into(), detail: text.chars().take(180).collect(), status: "running".into(), meta: "text only".into(),
         },
+        RunEvent::ApprovalRequired(request) => UiEvent {
+            kind: "approval".into(), title: "Approval".into(),
+            detail: format!("{} {}", request.tool, compact(&request.args)),
+            status: "running".into(), meta: request.hash.chars().take(8).collect(),
+        },
     }
 }
 
@@ -61,6 +108,7 @@ fn context_budget() -> usize {
 #[tauri::command]
 async fn run_task(
     app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
     task: String,
     done_condition: String,
     boundaries: Vec<String>,
@@ -75,6 +123,8 @@ async fn run_task(
         _ => RunMode::Ask,
     };
     let model = model.unwrap_or_else(|| "spark-x26".to_owned());
+    let state = state.inner().clone();
+    state.cancel.store(false, Ordering::SeqCst);
 
     tauri::async_runtime::spawn_blocking(move || {
         let transport = LlamaCppClient::local(&model).map_err(|e| e.to_string())?;
@@ -93,13 +143,15 @@ async fn run_task(
         };
         let mut config = RunConfig::new(&model, task, done_condition)
             .with_boundaries(boundaries)
-            .with_max_steps(12);
+            .with_max_steps(12)
+            .with_cancel(state.cancel.clone());
         if let Some(cmd) = verify_command {
             config = config.with_verifier(cmd);
         }
 
         let emitter = app.clone();
-        let report = run_agent(&transport, &config, &ctx, &verifier, |event| {
+        let approver = TauriApprover { app: app.clone(), state: state.clone() };
+        let report = run_agent(&transport, &config, &ctx, &verifier, Some(&approver), |event| {
             let _ = emitter.emit("run_event", ui_event(event));
         }).map_err(|e| e.to_string())?;
 
@@ -116,9 +168,26 @@ async fn run_task(
     .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+fn approve(state: State<'_, Arc<AppState>>, id: String) -> bool {
+    state.approvals.resolve(&id, ApprovalDecision::Allow)
+}
+
+#[tauri::command]
+fn deny(state: State<'_, Arc<AppState>>, id: String) -> bool {
+    state.approvals.resolve(&id, ApprovalDecision::Deny)
+}
+
+#[tauri::command]
+fn cancel_run(state: State<'_, Arc<AppState>>) -> bool {
+    state.cancel.store(true, Ordering::SeqCst);
+    true
+}
+
 fn main() {
     tauri::Builder::default()
-        .invoke_handler(tauri::generate_handler![context_budget, run_task])
+        .manage(Arc::new(AppState::default()))
+        .invoke_handler(tauri::generate_handler![context_budget, run_task, approve, deny, cancel_run])
         .run(tauri::generate_context!())
         .expect("error while running tinyloop");
 }

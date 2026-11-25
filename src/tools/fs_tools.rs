@@ -67,7 +67,6 @@ fn walk(dir: &Path, needle: &str, max: usize, hits: &mut Vec<String>) {
 
 pub fn apply_patch(ctx: &ToolContext, args: &Value) -> ToolResult {
     if ctx.mode == RunMode::DryRun { return ToolResult::error("dry-run: patch not applied", "Re-run in ask/auto mode to apply."); }
-    if ctx.mode == RunMode::Ask { return ToolResult::error("approval required: patch not applied", "Approve this exact patch in the UI, then retry."); }
     let rel = match args.get("path").and_then(|v| v.as_str()) { Some(p) => p, None => return ToolResult::error("missing path", "Pass a workspace-relative path.") };
     let old = match args.get("old_string").and_then(|v| v.as_str()) { Some(s) if !s.is_empty() => s, _ => return ToolResult::error("missing old_string", "Provide the exact text to replace.") };
     let new = args.get("new_string").and_then(|v| v.as_str()).unwrap_or("");

@@ -8,7 +8,7 @@ Control pane for the current orchestration pass. One owner at a time; every card
 |---|---|---|---|---|
 | card-001 Real model capability probe | **Merged** | hermes | `src/model/`, `src/bin/probe.rs` | probe returns tools_visible + tool_call_ok |
 | card-002 Real end-to-end loop task | **Merged** | hermes | `src/loop_engine/`, `src/tools/`, `src/bin/run.rs` | verifier exits 0 on final state |
-| card-003 Approval flow (`approve`/`deny`/`cancel_run`) | **Ready** | hermes | `desktop/src-tauri/src/main.rs`, `desktop/src/App.tsx`, `src/loop_engine/` | Ask-mode patch blocks until approval; deny leaves file untouched |
+| card-003 Approval flow (`approve`/`deny`/`cancel_run`) | **Merged** | hermes | `desktop/src-tauri/src/main.rs`, `desktop/src/App.tsx`, `src/loop_engine/` | Ask-mode patch blocks until approval; deny leaves file untouched |
 | card-004 Audit JSONL | **Backlog** | — | `src/audit.rs` | every tool call + approval + token count appended and replayable |
 | card-005 Context manager + compaction | **Backlog** | — | `src/context.rs` | 85% trigger, state.md written first, exact recent tail kept |
 | card-006 Eval suite + metrics | **Backlog** | — | `tests/eval/` | 5 smoke + 10 full tasks; final-state grading, tool validity separate |
@@ -28,12 +28,19 @@ Control pane for the current orchestration pass. One owner at a time; every card
 - **Evidence**: run log — plan accepted, read ×2, patch applied, `VERIFY passed=true`, `STATUS: Done`, 4 steps, 3,924 prompt tokens, 139 completion tokens, 3,535 cache hits.
 - **Gate**: passed.
 
+## card-003 — Approval flow
+
+- **Acceptance**: Ask-mode write blocks; Allow executes; Deny leaves the file untouched; cancel stops at the next loop boundary.
+- **Evidence**: `cargo test --lib` — 19/19, including `ask_mode_denies_patch_without_an_approver` and `ask_mode_applies_patch_after_approval`.
+- **Wiring**: core emits `ApprovalRequired`, `TauriApprover` blocks on a channel, UI `approve`/`deny` resolves by id, `cancel_run` flips an `AtomicBool` checked each loop turn.
+- **Caveat**: the UI click-through has not been automated inside the WebView; core behavior is tested, window launches and responds.
+
 ## Blockers
 
 | Blocker | Owner | Next action |
 |---|---|---|
-| Ask-mode approval not wired | hermes | card-003: add a channel + `approval_required` event; core waits for decision |
 | Installer not built | — | card-007: enable `bundle.active`, run `pnpm tauri build` |
+| UI click-through automation | — | card-008: drive the WebView or add a headless Tauri test harness |
 
 ## Notes
 

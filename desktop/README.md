@@ -28,7 +28,7 @@ pnpm tauri build --no-bundle
 - `run_task` is wired: the Run button calls the Rust loop engine, which streams `run_event` steps back into the timeline.
 - Core loop works in tests: plan → read → patch → verifier → Done, plus 3-strike escalation and text-only bounded repair.
 - **Real model verified:** `llama serve` (build 12652) + `Spark-X2.6-4B-Q4_K_M.gguf` on port 9941. Probe passes, and a real read → patch → verify task finished `Done` in 4 steps.
-- Approval flow is not wired: `Ask` mode blocks writes/commands by design; use `Auto` for a full run. `approve` / `deny` / `cancel_run` are the next wiring item.
+- Approval flow is wired: in `Ask` mode a write/command raises an Allow/Deny card bound to the tool args + SHA-256. Deny leaves the file untouched. `cancel_run` stops at the next loop boundary.
 
 Start the server:
 
