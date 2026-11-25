@@ -13,7 +13,7 @@ Control pane for the current orchestration pass. One owner at a time; every card
 | card-005 Context manager + compaction | **Merged** | hermes | `src/context.rs`, `src/loop_engine/` | 85% trigger, state.md written first, exact recent tail kept |
 | card-006 Eval suite + metrics | **Merged** | hermes | `tests/eval/`, `src/bin/eval.rs` | 15/15 tasks, final-state grading, tool validity separate |
 | card-007 Installer | **Merged** | hermes | `desktop/src-tauri/tauri.conf.json` | MSI + NSIS installers build |
-| card-008 UI click-through harness | **Ready** | hermes | `desktop/src/App.test.tsx` | Vitest covers clarify + theme; real-window Allow/Deny still pending |
+| card-008 UI click-through harness | **Deferred** | hermes | `desktop/src/App.test.tsx` | Vitest covers clarify + theme; WebDriver click-through unavailable |
 
 ## card-001 — Real model capability probe
 
@@ -60,7 +60,7 @@ Control pane for the current orchestration pass. One owner at a time; every card
 
 | Blocker | Owner | Next action |
 |---|---|---|
-| Real-window Allow/Deny not click-tested | hermes | card-008: add `tauri-driver` + matching Edge WebDriver, or a Tauri mock-runtime test |
+| Real-window Allow/Deny not click-tested | — | Deferred: needs `tauri-driver` + matching Edge WebDriver; Vitest covers UI logic and 30 core tests cover the gate |
 
 ## UI tests
 
