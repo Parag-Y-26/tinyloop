@@ -118,6 +118,7 @@ pub enum RunEvent {
     Escalated { reason: String },
     TextOnlyRepair { text: String },
     ApprovalRequired(ApprovalRequest),
+    Masked { masked_turns: usize, before_tokens: usize, after_tokens: usize },
     Compacted { before_tokens: usize, after_tokens: usize },
 }
 
@@ -132,6 +133,8 @@ pub struct RunReport {
     pub predicted_ms: f64,
     pub tool_errors: u32,
     pub malformed_repairs: u32,
+    pub masked_turns: usize,
+    pub compactions: usize,
     pub final_text: Option<String>,
     pub events: Vec<RunEvent>,
 }
@@ -239,6 +242,7 @@ fn event_kind(event: &RunEvent) -> &'static str {
         RunEvent::Escalated { .. } => "escalated",
         RunEvent::TextOnlyRepair { .. } => "repair",
         RunEvent::ApprovalRequired(_) => "approval_required",
+        RunEvent::Masked { .. } => "observation_mask",
         RunEvent::Compacted { .. } => "compaction",
     }
 }
@@ -267,9 +271,34 @@ fn finalize_run(mut report: RunReport, audit: &AuditLog) -> RunReport {
         "predicted_ms": report.predicted_ms,
         "tool_errors": report.tool_errors,
         "malformed_repairs": report.malformed_repairs,
+        "masked_turns": report.masked_turns,
+        "compactions": report.compactions,
     }));
     report.status = report.status.or(Some(RunStatus::MaxSteps));
     report
+}
+
+/// Recompute unmasked observation character count from active `role == "tool"` messages.
+fn active_observation_chars(messages: &[Message]) -> usize {
+    messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .filter_map(|m| m.content.as_deref())
+        .map(|content| {
+            if content == context::MASKED_EXCERPT_MARKER {
+                return 0;
+            }
+            if let Ok(value) = serde_json::from_str::<Value>(content) {
+                return value
+                    .get("stdout_excerpt")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| *s != context::MASKED_EXCERPT_MARKER)
+                    .map(|s| s.chars().count())
+                    .unwrap_or(0);
+            }
+            content.chars().count()
+        })
+        .sum()
 }
 
 pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
@@ -307,7 +336,6 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
     let mut text_only_repairs = 0u32;
     let mut plan_repairs = 0u32;
     let mut observation_chars = 0usize;
-    let mut last_prompt_tokens: Option<u32> = None;
     let mut steps = 0usize;
 
     while steps < config.max_steps {
@@ -329,9 +357,7 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
         report.cache_hits += response.timings.as_ref().map(|t| t.cache_n).unwrap_or(0);
         report.prompt_ms += response.timings.as_ref().map(|t| t.prompt_ms).unwrap_or(0.0);
         report.predicted_ms += response.timings.as_ref().map(|t| t.predicted_ms).unwrap_or(0.0);
-        if response.usage.prompt_tokens > 0 {
-            last_prompt_tokens = Some(response.usage.prompt_tokens);
-        }
+        let turn_prompt_tokens = (response.usage.prompt_tokens > 0).then_some(response.usage.prompt_tokens);
 
         let call = match response.tool_calls().first().cloned() {
             Some(call) => call,
@@ -508,24 +534,71 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
         push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::ToolResult { status: result.status.clone(), summary: result.summary.clone() });
 
         observation_chars = observation_chars.saturating_add(result.stdout_excerpt.chars().count());
-        messages.push(
-            Message::assistant_with_tool_calls(response.text().map(|s| s.to_string()), vec![call.clone()])
-                .with_reasoning(response.first().and_then(|c| c.message.reasoning_content.clone())),
-        );
-        messages.push(Message::tool_result(call.id.clone(), result.to_json()));
+        let assistant_msg = Message::assistant_with_tool_calls(response.text().map(|s| s.to_string()), vec![call.clone()])
+            .with_reasoning(response.first().and_then(|c| c.message.reasoning_content.clone()));
+        let tool_msg = Message::tool_result(call.id.clone(), result.to_json());
+        let new_turn_tokens = context::estimate_message(&assistant_msg) + context::estimate_message(&tool_msg);
+        messages.push(assistant_msg);
+        messages.push(tool_msg);
 
         let over_observation_budget = observation_chars > observation_budget;
-        let compacted = if over_observation_budget {
-            context::compact_with_metrics(&mut messages, &mut context_state, &ctx.root).inspect(|_| {
+        let outcome = if over_observation_budget {
+            let compact_metrics = context::compact_with_metrics(&mut messages, &mut context_state, &ctx.root);
+            if compact_metrics.is_some() {
                 observation_chars = 0;
-            })
+            }
+            context::ContextOutcome {
+                masked_turns: 0,
+                mask_metrics: None,
+                compact_metrics,
+            }
         } else {
-            context::maybe_compact(
-                &mut messages, &mut context_state, &ctx.root, config.context_tokens, last_prompt_tokens,
-            )
+            let outcome = context::manage_context(
+                &mut messages,
+                &mut context_state,
+                &ctx.root,
+                config.context_tokens,
+                turn_prompt_tokens,
+                new_turn_tokens,
+            );
+            if outcome.compact_metrics.is_some() {
+                observation_chars = 0;
+            } else if outcome.masked_turns > 0 {
+                observation_chars = active_observation_chars(&messages);
+            }
+            outcome
         };
-        if let Some((before_tokens, after_tokens)) = compacted {
-            push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Compacted { before_tokens, after_tokens });
+
+        if let Some((before_tokens, after_tokens)) = outcome.mask_metrics {
+            report.masked_turns += outcome.masked_turns;
+            push_emit(
+                &mut report.events,
+                &mut emit,
+                Some(&audit),
+                RunEvent::Masked {
+                    masked_turns: outcome.masked_turns,
+                    before_tokens,
+                    after_tokens,
+                },
+            );
+        }
+        if let Some((before_tokens, after_tokens)) = outcome.compact_metrics {
+            report.compactions = context_state.compactions;
+            push_emit(
+                &mut report.events,
+                &mut emit,
+                Some(&audit),
+                RunEvent::Compacted { before_tokens, after_tokens },
+            );
+            audit.append(
+                "prefix_reset",
+                serde_json::json!({
+                    "reason": "compaction",
+                    "before_tokens": before_tokens,
+                    "after_tokens": after_tokens,
+                    "compactions": context_state.compactions,
+                }),
+            );
         }
     }
 
@@ -593,8 +666,8 @@ mod tests {
         response.choices[0].message.reasoning_content = Some(reasoning.into());
         response
     }
-    fn with_prompt_tokens(mut response: ChatResponse, tokens: u32) -> ChatResponse {
-        response.usage.prompt_tokens = tokens;
+    fn with_prompt_tokens(mut response: ChatResponse, prompt_tokens: u32) -> ChatResponse {
+        response.usage.prompt_tokens = prompt_tokens;
         response
     }
 
@@ -712,8 +785,15 @@ mod tests {
         let config = RunConfig::new("spark-x26", "fix rate", "rate 10").with_max_steps(5).with_context_tokens(512);
         let report = run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
         assert_eq!(report.status, Some(RunStatus::Done));
+        assert!(report.compactions >= 1);
         assert!(report.events.iter().any(|e| matches!(e, RunEvent::Compacted { .. })));
-        assert!(root.join(".tinyloop").join("state.md").exists());
+        let state_md = fs::read_to_string(root.join(".tinyloop").join("state.md")).unwrap();
+        assert!(state_md.contains("- Compactions: 1"), "{state_md}");
+        let entries = crate::audit::AuditLog::read_all(&root);
+        assert!(entries.iter().any(|e| {
+            e.get("kind").and_then(|v| v.as_str()) == Some("prefix_reset")
+                && e.get("detail").and_then(|d| d.get("reason")).and_then(|v| v.as_str()) == Some("compaction")
+        }));
     }
 
     #[test]
@@ -915,5 +995,187 @@ mod tests {
         assert!(requests[1].messages.iter().any(|m|
             m.role == "assistant" && m.reasoning_content.as_deref() == Some("planning thoughts")
         ));
+    }
+
+    #[test]
+    fn tier1_block_masking_uses_prompt_tokens_plus_delta_and_adjusts_observation_budget() {
+        let root = workspace("tier1-masking");
+        fs::write(root.join("b.txt"), "x".repeat(900)).unwrap();
+        fs::write(root.join("s1.txt"), "1").unwrap();
+        fs::write(root.join("s2.txt"), "2").unwrap();
+        fs::write(root.join("s3.txt"), "y".repeat(300)).unwrap();
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let plan = serde_json::json!({"steps":[
+            {"tool":"read_file","description":"a"},
+            {"tool":"read_file","description":"b"},
+            {"tool":"finish","description":"c"}
+        ]});
+        let transport = FakeTransport::new(vec![
+            with_prompt_tokens(call("submit_plan", plan), 100),
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"b.txt"})), 50),
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"s1.txt"})), 280),
+            // 340 <= 384 (75% of 512) alone, but 340 + new_turn_tokens crosses 384 while staying <= 435 (85%).
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"s2.txt"})), 340),
+            // After Tier 1 masking adjusts observation_chars, another 300-char read does not overflow 1024.
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"s3.txt"})), 220),
+            with_prompt_tokens(call("finish", serde_json::json!({"summary":"done"})), 100),
+        ]);
+        let verifier = FakeVerifier { passes: Cell::new(true) };
+        let config = RunConfig::new("spark-x26", "inspect files", "done")
+            .with_max_steps(8)
+            .with_context_tokens(512);
+        let report = run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
+
+        assert_eq!(report.status, Some(RunStatus::Done));
+        assert_eq!(report.masked_turns, 2);
+        assert_eq!(report.compactions, 0);
+        assert!(report.events.iter().any(|e| matches!(
+            e,
+            RunEvent::Masked { masked_turns: 2, before_tokens, after_tokens } if after_tokens < before_tokens
+        )));
+        assert!(!report.events.iter().any(|e| matches!(e, RunEvent::Compacted { .. })));
+
+        let requests = transport.requests.borrow();
+        // Before step 4 crossed 75%, b.txt's excerpt remained unmasked.
+        let b_before_mask: Value = serde_json::from_str(requests[3].messages[5].content.as_deref().unwrap()).unwrap();
+        assert_ne!(b_before_mask["stdout_excerpt"], context::MASKED_EXCERPT_MARKER);
+
+        // After step 4 masked older turns, step 5 sees masked b.txt (with summary + artifacts preserved)
+        // and unmasked recent turns s1.txt and s2.txt.
+        let b_after_mask: Value = serde_json::from_str(requests[4].messages[5].content.as_deref().unwrap()).unwrap();
+        assert_eq!(b_after_mask["summary"], "read b.txt (1 lines)");
+        assert_eq!(b_after_mask["artifacts"].as_array().map(Vec::len), Some(1));
+        assert_eq!(b_after_mask["stdout_excerpt"], context::MASKED_EXCERPT_MARKER);
+
+        let s1_kept: Value = serde_json::from_str(requests[4].messages[7].content.as_deref().unwrap()).unwrap();
+        let s2_kept: Value = serde_json::from_str(requests[4].messages[9].content.as_deref().unwrap()).unwrap();
+        assert!(s1_kept["stdout_excerpt"].as_str().unwrap().contains("1: 1"));
+        assert!(s2_kept["stdout_excerpt"].as_str().unwrap().contains("1: 2"));
+
+        let entries = crate::audit::AuditLog::read_all(&root);
+        assert!(entries.iter().any(|e| e.get("kind").and_then(|v| v.as_str()) == Some("observation_mask")));
+        assert!(!entries.iter().any(|e| e.get("kind").and_then(|v| v.as_str()) == Some("prefix_reset")));
+        let report_entry = entries.iter().find(|e| e.get("kind").and_then(|v| v.as_str()) == Some("report")).unwrap();
+        assert_eq!(report_entry["detail"]["masked_turns"], 2);
+        assert_eq!(report_entry["detail"]["compactions"], 0);
+    }
+
+    #[test]
+    fn tier2_compaction_triggers_at_85_percent_and_when_masking_stays_above_75_percent() {
+        // Subcase A: > 85% directly triggers Tier 2 without masking.
+        let root_a = workspace("tier2-direct");
+        fs::write(root_a.join("a.txt"), "small").unwrap();
+        let ctx_a = ToolContext::new(&root_a, root_a.join(".tinyloop"), RunMode::Auto);
+        let plan = serde_json::json!({"steps":[
+            {"tool":"read_file","description":"a"},
+            {"tool":"finish","description":"b"},
+            {"tool":"finish","description":"c"}
+        ]});
+        let transport_a = FakeTransport::new(vec![
+            with_prompt_tokens(call("submit_plan", plan.clone()), 100),
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"a.txt"})), 400),
+            with_prompt_tokens(call("finish", serde_json::json!({"summary":"done"})), 100),
+        ]);
+        let verifier = FakeVerifier { passes: Cell::new(true) };
+        let config_a = RunConfig::new("spark-x26", "task", "done")
+            .with_max_steps(5)
+            .with_context_tokens(512);
+        let report_a = run_agent(&transport_a, &config_a, &ctx_a, &verifier, None, |_| {}).unwrap();
+        assert_eq!(report_a.status, Some(RunStatus::Done));
+        assert_eq!(report_a.masked_turns, 0);
+        assert_eq!(report_a.compactions, 1);
+        assert!(report_a.events.iter().any(|e| matches!(e, RunEvent::Compacted { .. })));
+        let state_a = fs::read_to_string(root_a.join(".tinyloop").join("state.md")).unwrap();
+        assert!(state_a.contains("- Compactions: 1"), "{state_a}");
+        let entries_a = crate::audit::AuditLog::read_all(&root_a);
+        assert!(entries_a.iter().any(|e| {
+            e.get("kind").and_then(|v| v.as_str()) == Some("prefix_reset")
+                && e["detail"]["reason"] == "compaction"
+                && e["detail"]["compactions"] == 1
+        }));
+
+        // Subcase B: between 75% and 85%, masking small turns fails to drop below 75% -> escalates to Tier 2.
+        let root_b = workspace("tier2-escalate");
+        fs::write(root_b.join("a.txt"), "1").unwrap();
+        fs::write(root_b.join("b.txt"), "2").unwrap();
+        fs::write(root_b.join("c.txt"), "3").unwrap();
+        let ctx_b = ToolContext::new(&root_b, root_b.join(".tinyloop"), RunMode::Auto);
+        let transport_b = FakeTransport::new(vec![
+            with_prompt_tokens(call("submit_plan", plan), 100),
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"a.txt"})), 100),
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"b.txt"})), 100),
+            // For 1024 context: 75% = 768, 85% = 870. 775 + ~70 = ~845 -> masks, still >= 768 -> compacts.
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"c.txt"})), 775),
+            with_prompt_tokens(call("finish", serde_json::json!({"summary":"done"})), 100),
+        ]);
+        let config_b = RunConfig::new("spark-x26", "task", "done")
+            .with_max_steps(6)
+            .with_context_tokens(1024);
+        let report_b = run_agent(&transport_b, &config_b, &ctx_b, &verifier, None, |_| {}).unwrap();
+        assert_eq!(report_b.status, Some(RunStatus::Done));
+        assert_eq!(report_b.masked_turns, 2);
+        assert_eq!(report_b.compactions, 1);
+        assert!(report_b.events.iter().any(|e| matches!(e, RunEvent::Masked { masked_turns: 2, .. })));
+        assert!(report_b.events.iter().any(|e| matches!(e, RunEvent::Compacted { .. })));
+        let state_b = fs::read_to_string(root_b.join(".tinyloop").join("state.md")).unwrap();
+        assert!(state_b.contains("- Compactions: 1"), "{state_b}");
+        let entries_b = crate::audit::AuditLog::read_all(&root_b);
+        assert!(entries_b.iter().any(|e| {
+            e.get("kind").and_then(|v| v.as_str()) == Some("prefix_reset")
+                && e["detail"]["reason"] == "compaction"
+                && e["detail"]["compactions"] == 1
+        }));
+        let report_entry_b = entries_b.iter().find(|e| e.get("kind").and_then(|v| v.as_str()) == Some("report")).unwrap();
+        assert_eq!(report_entry_b["detail"]["masked_turns"], 2);
+        assert_eq!(report_entry_b["detail"]["compactions"], 1);
+    }
+
+    #[test]
+    fn zero_prompt_tokens_falls_back_to_estimate_messages() {
+        let root = workspace("zero-fallback");
+        fs::write(root.join("a.txt"), "a".repeat(1200)).unwrap();
+        fs::write(root.join("b.txt"), "ok").unwrap();
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let plan = serde_json::json!({"steps":[
+            {"tool":"read_file","description":"a"},
+            {"tool":"read_file","description":"b"},
+            {"tool":"finish","description":"c"}
+        ]});
+        let transport = FakeTransport::new(vec![
+            with_prompt_tokens(call("submit_plan", plan), 100),
+            // Real prompt_tokens == 100 must prevent naive chars/4 compaction even though estimate > 1740.
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"a.txt"})), 100),
+            // prompt_tokens == 0 must NOT carry stale 100 and must fall back to estimate_messages + schema.
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"b.txt"})), 0),
+            with_prompt_tokens(call("finish", serde_json::json!({"summary":"done"})), 100),
+        ]);
+        let verifier = FakeVerifier { passes: Cell::new(true) };
+        let config = RunConfig::new("spark-x26", format!("fix {}", "t".repeat(1600)), "done")
+            .with_max_steps(6)
+            .with_context_tokens(2048);
+        let report = run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
+
+        assert_eq!(report.status, Some(RunStatus::Done));
+        assert_eq!(report.compactions, 1);
+        assert_eq!(
+            report.events.iter().filter(|e| matches!(e, RunEvent::Compacted { .. })).count(),
+            1
+        );
+
+        let requests = transport.requests.borrow();
+        // Prior to step 3 (after step 2 with prompt_tokens = 100), transcript was NOT compacted yet.
+        assert!(!requests[2].messages.iter().any(|m| {
+            m.content.as_deref().is_some_and(|c| c.contains("Compacted state"))
+        }));
+        // After step 3 (prompt_tokens = 0), fallback estimate triggered compaction.
+        assert!(requests[3].messages.iter().any(|m| {
+            m.role == "user" && m.content.as_deref().is_some_and(|c| c.contains("Compacted state"))
+        }));
+
+        let entries = crate::audit::AuditLog::read_all(&root);
+        assert!(entries.iter().any(|e| {
+            e.get("kind").and_then(|v| v.as_str()) == Some("prefix_reset")
+                && e["detail"]["reason"] == "compaction"
+        }));
     }
 }

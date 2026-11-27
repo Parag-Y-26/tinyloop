@@ -31,6 +31,7 @@ fn main() {
         RunEvent::Escalated { reason } => println!("ESCALATED: {reason}"),
         RunEvent::TextOnlyRepair { text } => println!("REPAIR (text only): {}", text.chars().take(120).collect::<String>()),
         RunEvent::ApprovalRequired(request) => println!("APPROVAL: {} {}", request.tool, request.hash),
+        RunEvent::Masked { masked_turns, before_tokens, after_tokens } => println!("MASK: {masked_turns} turns ({before_tokens} -> {after_tokens} tokens)"),
         RunEvent::Compacted { before_tokens, after_tokens } => println!("COMPACT: {before_tokens} -> {after_tokens} tokens"),
     }).expect("run");
 

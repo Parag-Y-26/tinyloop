@@ -150,6 +150,11 @@ fn ui_event(event: &RunEvent) -> UiEvent {
             detail: format!("{} {}", request.tool, compact(&request.args)),
             status: "running".into(), meta: request.hash.chars().take(8).collect(),
         },
+        RunEvent::Masked { masked_turns, before_tokens, after_tokens } => UiEvent {
+            kind: "observation_mask".into(), title: "Masked".into(),
+            detail: format!("{masked_turns} old tool turns masked ({before_tokens} -> {after_tokens} estimated tokens)"),
+            status: "done".into(), meta: format!("{masked_turns} turns"),
+        },
         RunEvent::Compacted { before_tokens, after_tokens } => UiEvent {
             kind: "compaction".into(), title: "Compacted".into(),
             detail: format!("{before_tokens} -> {after_tokens} estimated tokens"),
