@@ -5,7 +5,7 @@ pub mod observation;
 pub mod shell;
 
 use crate::model::ToolDef;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::PathBuf;
@@ -51,14 +51,19 @@ impl ToolContext {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub status: String,
     pub summary: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub next_actions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<i32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub stdout_excerpt: String,
+    #[serde(default)]
     pub truncated: bool,
 }
 
@@ -177,6 +182,108 @@ mod tests {
         let narrow = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
         let result = finish_with_artifact(&narrow, "success", "big".into(), body, Some(0));
         assert!(result.truncated, "the 8k default caps at 9828 chars");
+    }
+
+    #[test]
+    fn to_json_omits_empty_optional_fields() {
+        let sparse = ToolResult {
+            status: "success".into(),
+            summary: "done".into(),
+            next_actions: vec![],
+            artifacts: vec![],
+            exit_code: None,
+            stdout_excerpt: String::new(),
+            truncated: false,
+        };
+        let parsed: Value = serde_json::from_str(&sparse.to_json()).unwrap();
+        assert_eq!(parsed.get("status").and_then(|v| v.as_str()), Some("success"));
+        assert_eq!(parsed.get("summary").and_then(|v| v.as_str()), Some("done"));
+        assert_eq!(parsed.get("truncated").and_then(|v| v.as_bool()), Some(false));
+        assert!(parsed.get("next_actions").is_none());
+        assert!(parsed.get("artifacts").is_none());
+        assert!(parsed.get("exit_code").is_none());
+        assert!(parsed.get("stdout_excerpt").is_none());
+
+        let ok_empty = ToolResult::ok("patched a.txt", "");
+        let ok_parsed: Value = serde_json::from_str(&ok_empty.to_json()).unwrap();
+        assert_eq!(ok_parsed.get("exit_code"), Some(&json!(0)));
+        assert!(ok_parsed.get("next_actions").is_none());
+        assert!(ok_parsed.get("artifacts").is_none());
+        assert!(ok_parsed.get("stdout_excerpt").is_none());
+
+        let err = ToolResult::error("failed", "retry");
+        let err_parsed: Value = serde_json::from_str(&err.to_json()).unwrap();
+        assert_eq!(err_parsed.get("next_actions"), Some(&json!(["retry"])));
+        assert!(err_parsed.get("artifacts").is_none());
+        assert!(err_parsed.get("exit_code").is_none());
+        assert!(err_parsed.get("stdout_excerpt").is_none());
+    }
+
+    #[test]
+    fn to_json_preserves_no_output_marker_and_non_empty_fields() {
+        let result = ToolResult {
+            status: "error".into(),
+            summary: "cargo exited 1".into(),
+            next_actions: vec!["Read the error excerpt".into()],
+            artifacts: vec![".tinyloop/tool-1.txt".into()],
+            exit_code: Some(1),
+            stdout_excerpt: "command produced no output".into(),
+            truncated: true,
+        };
+        let parsed: Value = serde_json::from_str(&result.to_json()).unwrap();
+        assert_eq!(parsed.get("status").and_then(|v| v.as_str()), Some("error"));
+        assert_eq!(parsed.get("summary").and_then(|v| v.as_str()), Some("cargo exited 1"));
+        assert_eq!(parsed.get("next_actions"), Some(&json!(["Read the error excerpt"])));
+        assert_eq!(parsed.get("artifacts"), Some(&json!([".tinyloop/tool-1.txt"])));
+        assert_eq!(parsed.get("exit_code"), Some(&json!(1)));
+        assert_eq!(
+            parsed.get("stdout_excerpt").and_then(|v| v.as_str()),
+            Some("command produced no output")
+        );
+        assert_eq!(parsed.get("truncated"), Some(&json!(true)));
+    }
+
+    #[test]
+    fn tool_result_round_trips_via_serde_json() {
+        let sparse = ToolResult {
+            status: "success".into(),
+            summary: "ok".into(),
+            next_actions: vec![],
+            artifacts: vec![],
+            exit_code: None,
+            stdout_excerpt: String::new(),
+            truncated: false,
+        };
+        let sparse_back: ToolResult = serde_json::from_str(&sparse.to_json()).unwrap();
+        assert_eq!(sparse_back, sparse);
+
+        let full = ToolResult {
+            status: "error".into(),
+            summary: "cargo exited 2".into(),
+            next_actions: vec!["Fix syntax".into()],
+            artifacts: vec![".tinyloop/tool-2.txt".into()],
+            exit_code: Some(2),
+            stdout_excerpt: "command produced no output".into(),
+            truncated: true,
+        };
+        let full_back: ToolResult = serde_json::from_str(&full.to_json()).unwrap();
+        assert_eq!(full_back, full);
+
+        let minimal: ToolResult =
+            serde_json::from_str(r#"{"status":"error","summary":"result serialization failed"}"#)
+                .unwrap();
+        assert_eq!(
+            minimal,
+            ToolResult {
+                status: "error".into(),
+                summary: "result serialization failed".into(),
+                next_actions: vec![],
+                artifacts: vec![],
+                exit_code: None,
+                stdout_excerpt: String::new(),
+                truncated: false,
+            }
+        );
     }
 }
 
