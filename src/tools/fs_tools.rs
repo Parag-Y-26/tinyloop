@@ -12,12 +12,21 @@ fn resolve_existing(root: &Path, rel: &str) -> Result<PathBuf, String> {
 }
 
 fn resolve_for_write(root: &Path, rel: &str) -> Result<PathBuf, String> {
+    let root_canon = root.canonicalize().map_err(|e| format!("cannot resolve workspace: {e}"))?;
     let joined = root.join(rel);
+    // `symlink_metadata` also catches broken links that `exists()` misses.
+    if std::fs::symlink_metadata(&joined).is_ok() {
+        // An existing path may be a symlink; follow it and re-check so a
+        // workspace-local link cannot redirect the write outside the root.
+        let canon = joined.canonicalize().map_err(|e| format!("cannot resolve {rel}: {e}"))?;
+        if !canon.starts_with(&root_canon) { return Err(format!("path escapes workspace: {rel}")); }
+        return Ok(canon);
+    }
     let parent = joined.parent().ok_or_else(|| "path has no parent".to_string())?;
     let parent_canon = parent.canonicalize().map_err(|e| format!("cannot resolve parent of {rel}: {e}"))?;
-    let root_canon = root.canonicalize().map_err(|e| format!("cannot resolve workspace: {e}"))?;
     if !parent_canon.starts_with(&root_canon) { return Err(format!("path escapes workspace: {rel}")); }
-    Ok(joined)
+    let file_name = joined.file_name().ok_or_else(|| format!("{rel} has no file name"))?;
+    Ok(parent_canon.join(file_name))
 }
 
 pub fn read_file(ctx: &ToolContext, args: &Value) -> ToolResult {
@@ -77,4 +86,41 @@ pub fn apply_patch(ctx: &ToolContext, args: &Value) -> ToolResult {
     let updated = text.replacen(old, new, 1);
     if let Err(e) = fs::write(&path, &updated) { return ToolResult::error(format!("cannot write {rel}: {e}"), "Check permissions."); }
     ToolResult::ok(format!("patched {rel} ({} -> {} bytes)", text.len(), updated.len()), String::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::RunMode;
+    use serde_json::json;
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_write_escape_is_rejected() {
+        let root = std::env::temp_dir().join(format!("tinyloop-fs-{}", crate::audit::now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = root
+            .parent()
+            .unwrap()
+            .join(format!("tinyloop-fs-outside-{}.txt", crate::audit::now_ms()));
+        std::fs::write(&outside, "secret").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
+
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let result = apply_patch(&ctx, &json!({"path": "link.txt", "old_string": "secret", "new_string": "pwned"}));
+        assert_eq!(result.status, "error");
+        assert!(result.summary.contains("escapes"));
+        assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret");
+    }
+
+    #[test]
+    fn existing_file_inside_the_workspace_is_writable() {
+        let root = std::env::temp_dir().join(format!("tinyloop-fs-ok-{}", crate::audit::now_ms()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.txt"), "old").unwrap();
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let result = apply_patch(&ctx, &json!({"path": "a.txt", "old_string": "old", "new_string": "new"}));
+        assert_eq!(result.status, "success");
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "new");
+    }
 }

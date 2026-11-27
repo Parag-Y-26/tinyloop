@@ -25,7 +25,7 @@ export default function App() {
   const [palette, setPalette] = useState(false);
   const [cache, setCache] = useState(0);
   const [resultCap, setResultCap] = useState<number | null>(null);
-  const [workspace, setWorkspace] = useState('C:/Users/parag/Downloads/tinyloop');
+  const [workspace, setWorkspace] = useState('');
   const [verifyCommand, setVerifyCommand] = useState('cargo test --lib');
   const [pendingApproval, setPendingApproval] = useState<PendingApproval | null>(null);
   const [doneCondition, setDoneCondition] = useState('the verifier command exits 0');
@@ -44,6 +44,16 @@ export default function App() {
       .then(({ invoke }) => invoke<number>('context_budget'))
       .then(setResultCap)
       .catch(() => setResultCap(null));
+  }, []);
+
+  // Default the workspace to the core process's working directory instead of
+  // shipping someone's local path in the UI.
+  useEffect(() => {
+    if (!isTauri) return;
+    import('@tauri-apps/api/core')
+      .then(({ invoke }) => invoke<string>('current_dir'))
+      .then(dir => { if (typeof dir === 'string' && dir) setWorkspace(dir); })
+      .catch(() => { /* leave blank; the user can type a path */ });
   }, []);
 
   // In the packaged app, core → UI events stream through Tauri.
@@ -193,9 +203,9 @@ export default function App() {
             <input className="run-input" data-testid="verifier-input" value={verifyCommand} onChange={e => setVerifyCommand(e.target.value)} />
             <p className="k" style={{ marginTop: 6 }}>Ask mode blocks writes until approval is wired; use Auto for a full run.</p>
           </div></div>}
-          <div className="section"><h2>Goal</h2><div className="contract"><p><span className="k">Done when</span><code>cargo test</code> exits 0 and <code>src/tax.rs</code> contains <code>fn calc_total</code></p></div></div>
-          <div className="section"><h2>Boundaries</h2><div className="contract"><p><span className="k">Must not</span> edit tests, touch files outside <code>src/</code>, or use the network.</p></div></div>
-          <div className="section"><h2>Verifier</h2><div className="contract"><p><code>cargo test --quiet</code><br/><span className="k">Judge</span><code>Rust, not the model</code></p></div></div>
+          <div className="section"><h2>Goal</h2><div className="contract"><p><span className="k">Done when</span> {doneCondition}</p></div></div>
+          <div className="section"><h2>Boundaries</h2><div className="contract"><p><span className="k">Must not</span> {boundariesText.split('\n').map(s => s.trim()).filter(Boolean).join('; ') || 'none set'}</p></div></div>
+          <div className="section"><h2>Verifier</h2><div className="contract"><p><code>{verifyCommand || 'none — the loop cannot declare Done without one'}</code><br/><span className="k">Judge</span><code>Rust, not the model</code></p></div></div>
           <div className="divider"/>
           <div className="section"><h2>Approval</h2>
             {pendingApproval ? <div className="approval" data-testid="approval-card"><div className="head"><i className="dot2"/>Approval required</div>

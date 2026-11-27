@@ -10,6 +10,9 @@ use std::path::Path;
 pub const DEFAULT_CONTEXT_TOKENS: usize = 8192;
 pub const COMPACT_AT: f64 = 0.85;
 pub const KEEP_RECENT: usize = 4;
+/// The frozen system prompt plus the seven tool schemas cost roughly this
+/// much of the window even though they are not part of `messages`.
+pub const TOOL_SCHEMA_TOKENS: usize = 1200;
 
 #[derive(Debug, Clone)]
 pub struct ContextState {
@@ -76,7 +79,21 @@ pub fn estimate_messages(messages: &[Message]) -> usize {
 }
 
 pub fn should_compact(messages: &[Message], context_tokens: usize) -> bool {
-    estimate_messages(messages) > (context_tokens as f64 * COMPACT_AT) as usize
+    should_compact_with_usage(messages, context_tokens, None)
+}
+
+/// Prefer the exact `usage.prompt_tokens` the server already reported; it
+/// includes the tool schemas. Fall back to the char estimate plus the schema
+/// overhead only until the first response arrives.
+pub fn should_compact_with_usage(
+    messages: &[Message],
+    context_tokens: usize,
+    reported_prompt_tokens: Option<u32>,
+) -> bool {
+    let threshold = (context_tokens as f64 * COMPACT_AT) as usize;
+    let estimated = estimate_messages(messages) + TOOL_SCHEMA_TOKENS;
+    let reported = reported_prompt_tokens.unwrap_or(0) as usize;
+    estimated > threshold || reported > threshold
 }
 
 pub fn write_state(root: &Path, state: &ContextState) {
@@ -89,8 +106,18 @@ pub fn compact(messages: &mut Vec<Message>, state: &mut ContextState, root: &Pat
     if messages.len() <= KEEP_RECENT + 1 { return false; }
     write_state(root, state);
     let system = messages.first().cloned();
-    let tail: Vec<Message> = messages.iter().rev().take(KEEP_RECENT).rev().cloned().collect();
-    let summary = Message::system(format!("Compacted state (deterministic):\n{}", state.render()));
+    // Never start the kept tail with a tool result: an orphaned `role: "tool"`
+    // message is rejected by chat templates. Walk back until the assistant
+    // message that owns the tool call is included too.
+    let mut cut = messages.len().saturating_sub(KEEP_RECENT);
+    while cut > 1 && messages.get(cut).map(|m| m.role == "tool").unwrap_or(false) {
+        cut -= 1;
+    }
+    let tail: Vec<Message> = messages[cut..].to_vec();
+    // A single leading system message is required by many templates. The
+    // compacted state goes in a user message, which also keeps the cacheable
+    // system prefix byte-identical.
+    let summary = Message::user(format!("Compacted state (deterministic):\n{}", state.render()));
     messages.clear();
     if let Some(system) = system { messages.push(system); }
     messages.push(summary);
@@ -99,14 +126,12 @@ pub fn compact(messages: &mut Vec<Message>, state: &mut ContextState, root: &Pat
     true
 }
 
-pub fn maybe_compact(
+pub fn compact_with_metrics(
     messages: &mut Vec<Message>,
     state: &mut ContextState,
     root: &Path,
-    context_tokens: usize,
 ) -> Option<(usize, usize)> {
     let before = estimate_messages(messages);
-    if !should_compact(messages, context_tokens) { return None; }
     if compact(messages, state, root) {
         Some((before, estimate_messages(messages)))
     } else {
@@ -114,12 +139,41 @@ pub fn maybe_compact(
     }
 }
 
+pub fn maybe_compact(
+    messages: &mut Vec<Message>,
+    state: &mut ContextState,
+    root: &Path,
+    context_tokens: usize,
+    reported_prompt_tokens: Option<u32>,
+) -> Option<(usize, usize)> {
+    if !should_compact_with_usage(messages, context_tokens, reported_prompt_tokens) { return None; }
+    compact_with_metrics(messages, state, root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn msg(role: &str, content: &str) -> Message {
-        Message { role: role.into(), content: Some(content.into()), tool_calls: None, tool_call_id: None, name: None }
+        Message {
+            role: role.into(),
+            content: Some(content.into()),
+            reasoning_content: None,
+            tool_calls: None,
+            tool_call_id: None,
+            name: None,
+        }
+    }
+
+    fn call(id: &str) -> crate::model::ToolCall {
+        crate::model::ToolCall {
+            id: id.into(),
+            kind: "function".into(),
+            function: crate::model::FunctionCall {
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "a.txt"}),
+            },
+        }
     }
 
     #[test]
@@ -146,6 +200,45 @@ mod tests {
         assert!(!should_compact(&small, 8192));
         let huge = vec![msg("user", &"x".repeat(40_000))];
         assert!(should_compact(&huge, 8192));
+    }
+
+    #[test]
+    fn tool_schema_overhead_is_part_of_the_estimate() {
+        let messages = vec![msg("user", &"x".repeat(24_000))];
+        let threshold = (8192f64 * COMPACT_AT) as usize;
+        assert!(estimate_messages(&messages) < threshold);
+        assert!(should_compact(&messages, 8192));
+    }
+
+    #[test]
+    fn reported_prompt_tokens_trigger_compaction() {
+        let small = vec![msg("user", "short")];
+        assert!(!should_compact_with_usage(&small, 8192, Some(100)));
+        assert!(should_compact_with_usage(&small, 8192, Some(7000)));
+    }
+
+    #[test]
+    fn compaction_never_orphans_tool_results() {
+        let root = std::env::temp_dir().join(format!("tinyloop-ctx-tool-{}", crate::audit::now_ms()));
+        fs::create_dir_all(&root).unwrap();
+        let mut messages = vec![
+            msg("system", "rules"),
+            msg("user", "start"),
+            Message::assistant_with_tool_calls(None, vec![call("c1")]),
+            msg("tool", "result-1"),
+            msg("user", "again"),
+            Message::assistant_with_tool_calls(None, vec![call("c2")]),
+            msg("tool", "result-2"),
+        ];
+        let mut state = ContextState::new("goal", "done", &[]);
+        assert!(compact(&mut messages, &mut state, &root));
+        assert_eq!(messages.iter().filter(|m| m.role == "system").count(), 1);
+        assert_eq!(messages[0].role, "system");
+        assert_eq!(messages[1].role, "user");
+        assert_ne!(messages[2].role, "tool", "tail must not start with a tool result");
+        let tail = &messages[2..];
+        assert!(tail.windows(2).all(|pair| !(pair[0].role == "assistant" && pair[1].role == "tool")
+            || pair[0].tool_calls.is_some()));
     }
 
     #[test]

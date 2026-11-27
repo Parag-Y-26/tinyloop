@@ -21,6 +21,9 @@ pub struct ToolContext {
     pub mode: RunMode,
     pub allowlist: Vec<String>,
     pub timeout: Duration,
+    /// Context window used to derive live result caps. `run_agent` overrides
+    /// this with `RunConfig::context_tokens` before executing any tool.
+    pub context_tokens: usize,
 }
 
 impl ToolContext {
@@ -30,7 +33,13 @@ impl ToolContext {
             allowlist: ["cargo", "git", "rg", "pnpm", "npm", "node", "python", "python3"]
                 .iter().map(|s| s.to_string()).collect(),
             timeout: Duration::from_secs(30),
+            context_tokens: crate::model::DEFAULT_CONTEXT,
         }
+    }
+
+    pub fn with_context_tokens(mut self, tokens: usize) -> Self {
+        self.context_tokens = tokens.max(512);
+        self
     }
 }
 
@@ -149,11 +158,23 @@ mod tests {
         let result = execute(&ctx, "apply_patch", &json!({"path": "../outside.txt", "old_string": "a", "new_string": "b"}));
         assert_eq!(result.status, "error");
     }
+
+    #[test]
+    fn result_budget_tracks_the_configured_context() {
+        let root = workspace("budget");
+        let body = "x".repeat(20_000);
+        let wide = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto).with_context_tokens(100_000);
+        let result = finish_with_artifact(&wide, "success", "big".into(), body.clone(), Some(0));
+        assert!(!result.truncated, "a 100k window admits 32k chars");
+        let narrow = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let result = finish_with_artifact(&narrow, "success", "big".into(), body, Some(0));
+        assert!(result.truncated, "the 8k default caps at 9828 chars");
+    }
 }
 
 #[allow(clippy::items_after_test_module)]
 pub fn finish_with_artifact(ctx: &ToolContext, status: &str, summary: String, stdout: String, exit_code: Option<i32>) -> ToolResult {
-    let budget = observation::resolve_tool_result_budget(8192);
+    let budget = observation::resolve_tool_result_budget(ctx.context_tokens);
     let _ = fs::create_dir_all(&ctx.artifacts);
     let artifact = ctx.artifacts.join(format!("tool-{}.txt", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0)));
     let mut artifacts = vec![];

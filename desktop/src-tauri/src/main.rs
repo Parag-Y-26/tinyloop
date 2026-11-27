@@ -4,14 +4,17 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{Emitter, State};
 use tinyloop_core::loop_engine::{
     run_agent, AnyVerifier, ApprovalDecision, ApprovalRequest, Approver, CommandVerifier,
     NeverVerifier, RunConfig, RunEvent, RunReport, RunStatus,
 };
-use tinyloop_core::model::{run_startup_probe, LlamaCppClient};
+use tinyloop_core::model::{run_startup_probe, LlamaCppClient, ProbeReport, DEFAULT_CONTEXT};
 use tinyloop_core::tools::{RunMode, ToolContext};
+
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+const APPROVAL_POLL: Duration = Duration::from_millis(250);
 
 #[derive(Default)]
 struct ApprovalRegistry {
@@ -26,12 +29,45 @@ impl ApprovalRegistry {
             None => false,
         }
     }
+
+    /// Cancel must resolve every waiting approval, otherwise a run stays
+    /// blocked in `recv_timeout` long after the user pressed Cancel.
+    fn deny_all(&self) -> usize {
+        let Ok(mut map) = self.pending.lock() else { return 0 };
+        let count = map.len();
+        for (_, tx) in map.drain() {
+            let _ = tx.send(ApprovalDecision::Deny);
+        }
+        count
+    }
 }
 
 #[derive(Default)]
 struct AppState {
     approvals: ApprovalRegistry,
     cancel: Arc<AtomicBool>,
+    /// The startup probe is a per-process, per-model check; cache the result
+    /// instead of paying three requests on every task.
+    probes: Mutex<HashMap<String, Result<ProbeReport, String>>>,
+}
+
+impl AppState {
+    fn ensure_probe(&self, model: &str, transport: &LlamaCppClient) -> Result<(ProbeReport, bool), String> {
+        if let Ok(map) = self.probes.lock() {
+            if let Some(cached) = map.get(model) {
+                return cached.clone().map(|report| (report, false));
+            }
+        }
+        let outcome = run_startup_probe(transport, model, None).map_err(|e| e.to_string());
+        // Cache only success: a transient outage must not poison every later
+        // task for this process.
+        if let Ok(report) = &outcome {
+            if let Ok(mut map) = self.probes.lock() {
+                map.insert(model.to_owned(), Ok(report.clone()));
+            }
+        }
+        outcome.map(|report| (report, true))
+    }
 }
 
 struct TauriApprover {
@@ -46,7 +82,24 @@ impl Approver for TauriApprover {
             map.insert(request.id.clone(), tx);
         }
         let _ = self.app.emit("approval_required", request.clone());
-        rx.recv_timeout(Duration::from_secs(300)).unwrap_or(ApprovalDecision::Deny)
+        let deadline = Instant::now() + APPROVAL_TIMEOUT;
+        loop {
+            if self.state.cancel.load(Ordering::SeqCst) {
+                if let Ok(mut map) = self.state.approvals.pending.lock() {
+                    map.remove(&request.id);
+                }
+                return ApprovalDecision::Deny;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return ApprovalDecision::Deny;
+            }
+            match rx.recv_timeout(remaining.min(APPROVAL_POLL)) {
+                Ok(decision) => return decision,
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(mpsc::RecvTimeoutError::Disconnected) => return ApprovalDecision::Deny,
+            }
+        }
     }
 }
 
@@ -107,7 +160,14 @@ fn ui_event(event: &RunEvent) -> UiEvent {
 
 #[tauri::command]
 fn context_budget() -> usize {
-    tinyloop_core::tools::observation::resolve_tool_result_budget(8192).max_chars
+    tinyloop_core::tools::observation::resolve_tool_result_budget(DEFAULT_CONTEXT).max_chars
+}
+
+#[tauri::command]
+fn current_dir() -> String {
+    std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -134,12 +194,14 @@ async fn run_task(
 
     tauri::async_runtime::spawn_blocking(move || {
         let transport = LlamaCppClient::local(&model).map_err(|e| e.to_string())?;
-        let probe = run_startup_probe(&transport, &model, None).map_err(|e| e.to_string())?;
-        let _ = app.emit("run_event", UiEvent {
-            kind: "probe".into(), title: "Probe".into(),
-            detail: format!("tools visible ({} -> {} prompt tokens), tool call parsed", probe.prompt_tokens_without_tools, probe.prompt_tokens_with_tools),
-            status: "done".into(), meta: "capability".into(),
-        });
+        let (probe, fresh) = state.ensure_probe(&model, &transport)?;
+        if fresh {
+            let _ = app.emit("run_event", UiEvent {
+                kind: "probe".into(), title: "Probe".into(),
+                detail: format!("tools visible ({} -> {} prompt tokens), tool call parsed", probe.prompt_tokens_without_tools, probe.prompt_tokens_with_tools),
+                status: "done".into(), meta: "capability".into(),
+            });
+        }
 
         let artifacts = std::path::Path::new(&cwd).join(".tinyloop").join("artifacts");
         let ctx = ToolContext::new(&cwd, artifacts, mode);
@@ -187,13 +249,21 @@ fn deny(state: State<'_, Arc<AppState>>, id: String) -> bool {
 #[tauri::command]
 fn cancel_run(state: State<'_, Arc<AppState>>) -> bool {
     state.cancel.store(true, Ordering::SeqCst);
+    state.approvals.deny_all();
     true
 }
 
 fn main() {
     tauri::Builder::default()
         .manage(Arc::new(AppState::default()))
-        .invoke_handler(tauri::generate_handler![context_budget, run_task, approve, deny, cancel_run])
+        .invoke_handler(tauri::generate_handler![
+            context_budget,
+            current_dir,
+            run_task,
+            approve,
+            deny,
+            cancel_run
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tinyloop");
 }

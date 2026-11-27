@@ -51,6 +51,14 @@ pub struct FunctionCall {
     pub arguments: Value,
 }
 
+impl FunctionCall {
+    /// `Some(raw)` when the model emitted arguments that were not valid JSON.
+    /// The loop must repair this instead of executing a placeholder object.
+    pub fn malformed_text(&self) -> Option<&str> {
+        self.arguments.get("__unparsed").and_then(|v| v.as_str())
+    }
+}
+
 /// llama.cpp may return `arguments` as a JSON string even when the template
 /// wants a dict. Normalize both forms before the tool layer sees them.
 fn deserialize_arguments<'de, D>(deserializer: D) -> Result<Value, D::Error>
@@ -81,6 +89,10 @@ pub struct Message {
     pub role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// Kept in multi-turn history so the chat template re-renders consistently
+    /// (see docs/MODEL_PROFILE.md).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,19 +103,23 @@ pub struct Message {
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: "system".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None, name: None }
+        Self { role: "system".into(), content: Some(content.into()), reasoning_content: None, tool_calls: None, tool_call_id: None, name: None }
     }
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: "user".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None, name: None }
+        Self { role: "user".into(), content: Some(content.into()), reasoning_content: None, tool_calls: None, tool_call_id: None, name: None }
     }
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: "assistant".into(), content: Some(content.into()), tool_calls: None, tool_call_id: None, name: None }
+        Self { role: "assistant".into(), content: Some(content.into()), reasoning_content: None, tool_calls: None, tool_call_id: None, name: None }
     }
     pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
-        Self { role: "tool".into(), content: Some(content.into()), tool_calls: None, tool_call_id: Some(tool_call_id.into()), name: None }
+        Self { role: "tool".into(), content: Some(content.into()), reasoning_content: None, tool_calls: None, tool_call_id: Some(tool_call_id.into()), name: None }
     }
     pub fn assistant_with_tool_calls(content: Option<String>, calls: Vec<ToolCall>) -> Self {
-        Self { role: "assistant".into(), content, tool_calls: Some(calls), tool_call_id: None, name: None }
+        Self { role: "assistant".into(), content, reasoning_content: None, tool_calls: Some(calls), tool_call_id: None, name: None }
+    }
+    pub fn with_reasoning(mut self, reasoning: Option<String>) -> Self {
+        self.reasoning_content = reasoning;
+        self
     }
 }
 
@@ -143,6 +159,7 @@ impl ChatRequest {
     pub fn with_messages(mut self, messages: Vec<Message>) -> Self { self.messages = messages; self }
     pub fn with_tools(mut self, tools: Vec<ToolDef>) -> Self { self.tools = Some(tools); self }
     pub fn with_max_tokens(mut self, max: u32) -> Self { self.max_tokens = max; self }
+    pub fn with_temperature(mut self, temperature: f64) -> Self { self.temperature = temperature; self }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -263,8 +280,16 @@ pub fn probe_tool() -> ToolDef {
     )
 }
 
+/// Live probes at temperature 1.0 produced malformed tool calls twice
+/// (docs/AGENT_BOARD.md). Probe with low temperature; the loop keeps the
+/// frozen vendor sampling.
+pub const PROBE_TEMPERATURE: f64 = 0.2;
+
 fn probe_base(model: &str, prompt: &str) -> ChatRequest {
-    ChatRequest::for_model(model).with_messages(vec![Message::user(prompt)]).with_max_tokens(128)
+    ChatRequest::for_model(model)
+        .with_messages(vec![Message::user(prompt)])
+        .with_max_tokens(128)
+        .with_temperature(PROBE_TEMPERATURE)
 }
 
 /// Verify before any real work that native tool calling is actually alive.
@@ -320,15 +345,17 @@ mod tests {
     struct Fake {
         health: Result<(), ModelError>,
         queue: RefCell<VecDeque<Result<ChatResponse, ModelError>>>,
+        requests: RefCell<Vec<ChatRequest>>,
     }
     impl Fake {
         fn new(health: Result<(), ModelError>, responses: Vec<Result<ChatResponse, ModelError>>) -> Self {
-            Self { health, queue: RefCell::new(responses.into()) }
+            Self { health, queue: RefCell::new(responses.into()), requests: RefCell::new(Vec::new()) }
         }
     }
     impl ChatTransport for Fake {
         fn health(&self) -> Result<(), ModelError> { self.health.clone() }
-        fn chat(&self, _request: &ChatRequest) -> Result<ChatResponse, ModelError> {
+        fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, ModelError> {
+            self.requests.borrow_mut().push(request.clone());
             self.queue.borrow_mut().pop_front().expect("fake ran out of responses")
         }
     }
@@ -383,6 +410,25 @@ mod tests {
     }
 
     #[test]
+    fn probe_runs_at_low_temperature() {
+        let fake = Fake::new(Ok(()), vec![Ok(response(100, vec![])), Ok(response(160, vec![])), Ok(response(170, vec![sample_call()]))]);
+        run_startup_probe(&fake, "spark-x26", None).unwrap();
+        let requests = fake.requests.borrow();
+        assert_eq!(requests.len(), 3);
+        assert!(requests.iter().all(|r| r.temperature == PROBE_TEMPERATURE));
+    }
+
+    #[test]
+    fn assistant_reasoning_content_round_trips() {
+        let message = Message::assistant_with_tool_calls(None, vec![sample_call()])
+            .with_reasoning(Some("considered the tax rate".into()));
+        let json = serde_json::to_value(&message).unwrap();
+        assert_eq!(json["reasoning_content"], "considered the tax rate");
+        let parsed: Message = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.reasoning_content.as_deref(), Some("considered the tax rate"));
+    }
+
+    #[test]
     fn request_serializes_the_frozen_contract() {
         let request = ChatRequest::for_model("spark-x26")
             .with_messages(vec![Message::user("hi")])
@@ -404,6 +450,7 @@ mod tests {
             "finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":2}}"#;
         let parsed: ChatResponse = serde_json::from_str(raw).unwrap();
         assert!(parsed.tool_calls()[0].function.arguments.get("__unparsed").is_some());
+        assert_eq!(parsed.tool_calls()[0].function.malformed_text(), Some("{not json"));
     }
 
     #[test]

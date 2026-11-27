@@ -49,6 +49,7 @@ beforeEach(async () => {
   for (const key of Object.keys(listeners)) delete listeners[key];
   invokeMock.mockImplementation((cmd: string) => {
     if (cmd === 'context_budget') return Promise.resolve(12000);
+    if (cmd === 'current_dir') return Promise.resolve('C:/work/repo');
     return Promise.resolve(true);
   });
   (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {};
@@ -67,6 +68,8 @@ describe('tinyloop desktop under Tauri', () => {
     const run = deferred<ReturnType<typeof report>>();
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'context_budget') return Promise.resolve(12000);
+      if (cmd === 'current_dir') return Promise.resolve('C:/work/repo');
+    if (cmd === 'current_dir') return Promise.resolve('C:/work/repo');
       if (cmd === 'run_task') return run.promise;
       return Promise.resolve(true);
     });
@@ -93,6 +96,8 @@ describe('tinyloop desktop under Tauri', () => {
     const run = deferred<ReturnType<typeof report>>();
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'context_budget') return Promise.resolve(12000);
+      if (cmd === 'current_dir') return Promise.resolve('C:/work/repo');
+    if (cmd === 'current_dir') return Promise.resolve('C:/work/repo');
       if (cmd === 'run_task') return run.promise;
       return Promise.resolve(true);
     });
@@ -133,6 +138,8 @@ describe('tinyloop desktop under Tauri', () => {
     const run = deferred<ReturnType<typeof report>>();
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'context_budget') return Promise.resolve(12000);
+      if (cmd === 'current_dir') return Promise.resolve('C:/work/repo');
+    if (cmd === 'current_dir') return Promise.resolve('C:/work/repo');
       if (cmd === 'run_task') return run.promise;
       return Promise.resolve(true);
     });
@@ -149,6 +156,8 @@ describe('tinyloop desktop under Tauri', () => {
     const run = deferred<ReturnType<typeof report>>();
     invokeMock.mockImplementation((cmd: string) => {
       if (cmd === 'context_budget') return Promise.resolve(12000);
+      if (cmd === 'current_dir') return Promise.resolve('C:/work/repo');
+    if (cmd === 'current_dir') return Promise.resolve('C:/work/repo');
       if (cmd === 'run_task') return run.promise;
       return Promise.resolve(true);
     });
