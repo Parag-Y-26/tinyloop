@@ -120,48 +120,46 @@ Config defaults in `%APPDATA%/tinyloop/config.toml` (Windows) / `~/.config/tinyl
 
 | Tool | Risk | Execution | Notes |
 |---|---|---|---|
-| `submit_plan(steps[3..6])` | low | auto | Rust validates count and tool mapping |
-| `read_file(path, offset, limit)` | low | auto | ≤8K chars excerpt + artifact path; also lists directories |
-| `search_files(pattern, path, glob)` | low | auto | ripgrep-style, ≤50 hits, ranked |
-| `run_command(cmd, cwd, timeout)` | **high** | approval | allowlisted binaries, 30 s default |
-| `apply_patch(diff)` | medium | approval | unified diff only; preview first; lint before accepting |
-| `finish(result, evidence)` | low | auto | structured final answer + verifier evidence |
-| `escalate(reason, evidence)` | low | auto | explicit stop to the human |
+| `submit_plan(steps[3..6])` | low | auto | Rust validates step count (`3..=6`) and that each step maps to one of the 7 declared tools |
+| `read_file(path, offset, limit)` | low | auto | UTF-8 file reader (`offset`, `limit <= 400`, default 160 lines); caps excerpt via `ToolContext::context_tokens` + artifact spill |
+| `search_files(pattern, path, max_results)` | low | auto | Literal case-insensitive workspace search, `<= 50` hits, skips `.git`/`target`/`node_modules`/`dist`/`.tinyloop` and files > 1 MB |
+| `run_command(command, timeout_sec)` | **high** | approval | Allowlisted binaries (`cargo`, `git`, `rg`, `pnpm`, `npm`, `node`, `python`, `python3`), 30 s default (120 s max), pipe-drained (`2 MiB` capture cap/stream) |
+| `apply_patch(path, old_string, new_string)` | medium | approval | Unique exact string replacement inside canonicalized workspace (symlinks rejected) |
+| `finish(summary)` | low | auto | Requests deterministic external verifier run; only verifier pass yields `Done` |
+| `escalate(reason)` | low | auto | Explicit stop handing control back to the human |
 
-Clarification is handled by the CLI before the loop, not by an `ask_user` tool — that keeps the 7-tool budget and front-loads ambiguity.
+Clarification is handled before the loop (`RunConfig` / desktop Clarify modal), not by an `ask_user` tool — that keeps the 7-tool budget and front-loads ambiguity.
 
-Every tool result has one deterministic shape, sanitized **before** it enters the model transcript:
+Every tool result uses `ToolResult` (`src/tools/mod.rs`), serialized sparsely so empty/null fields (`next_actions: []`, `artifacts: []`, `exit_code: None`, `stdout_excerpt: ""`) are omitted via `#[serde(skip_serializing_if = ...)]` to save prompt tokens, while deriving `Deserialize` with `#[serde(default)]` for structured Tier 1 observation masking:
 
 ```json
 {
   "status": "success | warning | error",
   "summary": "one-line result",
   "next_actions": ["..."],
-  "artifacts": ["C:/.../.tinyloop/artifacts/07.txt"],
+  "artifacts": ["C:/.../.tinyloop/artifacts/tool-1795768583000.txt"],
   "exit_code": 0,
   "stdout_excerpt": "...",
   "truncated": true
 }
 ```
 
-- Errors are returned as results (`status: "error"`, root-cause hint, safe retry, stop condition), never thrown into the transcript as exceptions.
-- Empty output gets an explicit `"command produced no output"` marker; SWE-agent/OpenCode both do this to stop the model re-running a command.
-- Only `stdout_excerpt` is tokenized; `artifacts` and internal details stay out of the prompt (OpenClaw's `details` rule).
-- **Context-derived live caps at 8K:** per-result ≤ **9,828 chars** (`floor(8192 × 0.3) × 4`, capped at 16,000); total observation guard **8,192 chars** (`max(1024, 8192 × 2 × 0.5)`). Truncation is **head + tail** with an explicit `[N bytes omitted — full output at <path>]` marker; the transcript keeps the pointer, not the bulk.
+- Errors are returned as results (`status: "error"`, root-cause hint in `next_actions`), never thrown into the transcript as exceptions.
+- Empty command output gets an explicit `"command produced no output"` marker via `shell::output_or_marker`, so `stdout_excerpt` is non-empty and serialized for silent commands (stopping repeat re-runs), while truly empty excerpts (e.g., `apply_patch`, `ToolResult::error`) are omitted.
+- **Context-derived live caps:** `ToolContext` carries `context_tokens` (set by `run_agent` from `RunConfig::context_tokens` via `with_context_tokens`, no hardcoded `8192` inside `finish_with_artifact`), passed into `observation::resolve_tool_result_budget(ctx.context_tokens)`. At `8192` tokens this yields `max_chars = 9,828` chars per result and `max_context_chars = 8,192` total observation chars. Truncation is **head + tail** (UTF-8 char-boundary safe) with `[... N chars omitted; full output at <path> ...]` pointing to `.tinyloop/artifacts/tool-<ts_ms>.txt`.
 - Tool output is treated as **untrusted data**, never as instructions.
 
 **Two-layer permission gate** (per OpenClaw):
-1. **Capability** — a denied tool's schema is not even sent for that turn.
-2. **Allowlist + approval** — `deny` is the fallback; approval binds the exact args, canonical path, and content hash shown to the user.
+1. **Capability / Mode** — `RunMode::DryRun` blocks mutations/commands; `apply_patch` and `run_command` in `RunMode::Ask` require interactive approval.
+2. **Allowlist + approval** — `deny` is the fallback; approval binds `sha256(tool + "\0" + canonical_json(args))` shown to the user in the inspector card.
 
 **Sandbox rules**
 
-- `--cwd` is the root; all paths canonicalized and rejected if they escape it (including via symlink).
-- Deny-by-default: `sudo`, `rm -rf /`, `git push`, `git reset --hard`, `diskpart`, `format`, registry writes, etc. Each requires `--allow-high-risk` plus confirmation.
-- No network tools unless `--allow-network` is passed. Environment scrubbed of credentials before `run_command`.
-- Every call, approval decision, and result appended to `.tinyloop/audit.jsonl`.
+- `ToolContext::root` (`--cwd`) is the root; all paths are canonicalized and rejected if they escape it, and `resolve_for_write` rejects writes through **any** symlink (via `symlink_metadata`).
+- Command policy (`src/tools/shell.rs`): rejects shell metacharacters, validates quotes via `split_command`, blocks destructive `git` subcommands (`push`, `reset`, `clean`, `rebase`, `filter-branch`, `restore`, `commit`, `config`, `remote`, `checkout --`) and escaping flags (`-C`, `--git-dir`, `--work-tree`, `-c`), blocks `python -m http.server`, stdin `-`, default `python -c` (unless `allow_inline_code`), and inline `node` flags, and requires script paths to canonicalize inside the workspace. Environment is cleared (`env_clear()`) before spawning, keeping only safe OS/PATH vars.
+- Every call, approval decision, and result is appended to `.tinyloop/audit.jsonl`.
 
-### 4.4 ContextManager — the 8K budget
+### 4.4 ContextManager — the 8K budget & Two-Tier Management
 
 | Allocation | Tokens |
 |---|---:|
@@ -175,15 +173,19 @@ Every tool result has one deterministic shape, sanitized **before** it enters th
 | Slack | ~1056 |
 | **Total** | **8192** |
 
-Rules:
+Phase 2 Context Rules (`src/context.rs` + `src/loop_engine/engine.rs`):
 
-- **Prefix is frozen**: no clock, no random IDs, no tool reordering, no mid-session prompt rewrite. Volatile facts are appended after the prefix. Every prefix reset is logged with a named reason (`compaction`, `config_change`, `process_restart`).
-- Compaction triggers at **85% of window** (≈6,144 tokens) or at a phase boundary — whichever comes first, never mid-edit.
-- **Write state to disk before compacting**; then replace old history with a bounded structured summary while keeping an exact recent tail. Reject a truncated summary and retry once.
-- Compaction is deterministic Rust rendering of a structured state object — no extra LLM call, so a small model cannot lose facts in a summarization step. (If later a model-written summary is needed, make it a tool-free request with `response_format` and full tools forwarded to preserve prefix.)
-- `.tinyloop/state.md` holds: goal, done-condition, boundaries, facts, decisions, next step, cut point.
-- Prefix reuse is on by default in llama-server; verify via `timings.cache_n` / `usage.prompt_tokens_details.cached_tokens`. **Caution:** quantized local models plus caches are not bit-for-bit request-reproducible. For a verification pass that must be reproducible, pin cache flags or run that pass with caches disabled.
-- Full output goes to `.tinyloop/artifacts/<seq>.txt`; the model re-reads a slice with `read_file(offset, limit)`.
+- **Prefix is frozen & single-system-message invariant**: `messages[0]` (`role: "system"`) is kept untouched for the entire run — no clock, no random IDs, no tool reordering, and **never** a second `role: "system"` message. Every prefix reset (e.g., `"compaction"`) is logged as a `prefix_reset` event in `.tinyloop/audit.jsonl`.
+- **Real token measurement (fallback only when `== 0`)**: `effective_prompt_tokens(messages, reported_prompt_tokens, new_turn_tokens)` uses `(pt as usize).saturating_add(new_turn_tokens)` whenever `reported_prompt_tokens` is `Some(pt)` with `pt > 0`. It falls back to `estimate_messages(messages) + TOOL_SCHEMA_TOKENS` (`1200`) **only** when `reported_prompt_tokens` is `None` or `Some(0)` (so naive `chars / 4` never triggers premature compaction over real server counts).
+- **Two-tier context protection (`75% → 85%`)** via `manage_context`:
+  1. **Tier 1 — Block Observation Masking (`MASK_AT = 0.75`, ~6,144 tokens at 8K)**: Preserves the last `KEEP_RECENT_TURNS = 2` atomic turns verbatim; in one single batch across all older `role: "tool"` messages (index `>= 1`), parses `ToolResult` JSON and replaces non-empty `stdout_excerpt` (or non-JSON text) with `"[omitted — see summary and artifact path]"` (`MASKED_EXCERPT_MARKER`), keeping `status`, `summary`, `artifacts`, `next_actions`, `exit_code`, and `truncated` intact.
+  2. **Tier 2 — Full Deterministic Compaction (`COMPACT_AT = 0.85`, ~6,963 tokens at 8K, or when Tier 1 masks 0 turns / leaves tokens `>= 75%`, or on observation-budget overflow)**:
+     - Increment `state.compactions += 1` **before** calling `write_state(root, state)` and `state.render()`, so `.tinyloop/state.md` reflects the true count.
+     - Persist `.tinyloop/state.md` first (`goal`, `done`, `boundaries`, up to 16 recent `facts`, `next_step`, `compactions`).
+     - Slice `KEEP_RECENT` (`4` messages minimum) walking backward in **atomic turn units**, pairing each `role: "tool"` message (including consecutive tool results) with its owning `role: "assistant"` (`tool_calls`) message so the kept tail never starts with an orphaned `role: "tool"` message.
+     - Insert the deterministic recap as a `role: "user"` message: `[Compacted state — prior turns persisted to .tinyloop/state.md]\n...`.
+- **Observability & Metrics**: `RunReport` tracks both `masked_turns` and `compactions`; `AuditLog` records `compaction` and `prefix_reset` entries; `timings.cache_n` / `usage.prompt_tokens_details.cached_tokens` measure prompt-cache reuse.
+- Full raw tool output goes to `.tinyloop/artifacts/tool-<ts_ms>.txt`; the model re-reads slices with `read_file(offset, limit)`.
 
 ### 4.5 LoopEngine
 
