@@ -12,7 +12,7 @@
 
 Written by `context::write_state` (`src/context.rs`) from `ContextState::render()`:
 
-- **Fields**: `Goal`, `Done when`, `Must not` (boundaries joined by `; `), `Next step`, `Compactions` (incremented count), and `## Facts` (deduplicated FIFO capped at the newest `16` `<tool>: <summary>` observations).
+- **Fields**: `Goal`, `Done when`, `Must not` (boundaries joined by `; `), `Next step`, `Compactions` (incremented **before** `write_state` and `state.render()`), and `## Facts` (deduplicated FIFO capped at the newest `16` `<tool>: <summary>` observations).
 
 ### 1.2 Append-Only Audit Log (`.tinyloop/audit.jsonl`)
 
@@ -27,12 +27,19 @@ Written by `AuditLog::append` (`src/audit.rs`). One JSON object per line:
 }
 ```
 
-- **Current `kind` values (`src/loop_engine/engine.rs`)**: `plan`, `tool_call`, `tool_result`, `verify`, `finished`, `escalated`, `repair`, `approval_required`, `compaction`, `report`.
-- **Phase 2 target addition (`docs/TASKS.md`)**: `prefix_reset` event logged whenever compaction resets the cached prompt suffix, plus `masked_turns` and `compactions` in `report`.
+- **Emitted `kind` values (`src/loop_engine/engine.rs`)**: `plan`, `tool_call`, `tool_result`, `verify`, `finished`, `escalated`, `repair`, `approval_required`, `observation_mask`, `compaction`, `prefix_reset`, `report`.
+- **Phase 2 audit payloads**:
+  - `observation_mask` (from `RunEvent::Masked`): `{"masked_turns": usize, "before_tokens": usize, "after_tokens": usize}`.
+  - `compaction` (from `RunEvent::Compacted`): `{"before_tokens": usize, "after_tokens": usize}`.
+  - `prefix_reset`: logged whenever compaction mutates transcript history with `{"reason": "compaction", "before_tokens": usize, "after_tokens": usize, "compactions": usize}`.
+  - `report` (from `finalize_run`): includes `status`, `steps`, `prompt_tokens`, `completion_tokens`, `cache_hits`, `prompt_ms`, `predicted_ms`, `tool_errors`, `malformed_repairs`, `masked_turns`, and `compactions`.
 
-### 1.3 Spilled Tool Artifacts (`.tinyloop/artifacts/tool-<ts_ms>.txt`)
+### 1.3 Spilled Tool Artifacts & Sparse `ToolResult` (`.tinyloop/artifacts/tool-<ts_ms>.txt`)
 
-Written by `tools::finish_with_artifact` (`src/tools/mod.rs`) whenever `stdout.chars().count() > budget.max_chars`. The transcript retains only the head+tail excerpt plus the artifact file path.
+Written by `tools::finish_with_artifact` (`src/tools/mod.rs`) whenever `stdout.chars().count() > budget.max_chars`, where `budget = observation::resolve_tool_result_budget(ctx.context_tokens)`. The transcript retains only the head+tail excerpt plus the artifact file path.
+
+- `ToolResult` derives `Serialize` and `Deserialize` (with `#[serde(default)]`) and omits empty/null optional fields (`next_actions`, `artifacts`, `exit_code`, `stdout_excerpt`) via `#[serde(skip_serializing_if = ...)]`.
+- `shell::run_command` converts empty output to `"command produced no output"` via `output_or_marker`, keeping `stdout_excerpt` serialized for silent commands while truly empty excerpts (`apply_patch`, `ToolResult::error`) are omitted.
 
 ### 1.4 Evaluation Task & Output Schemas (`tests/eval/`, `src/bin/eval.rs`)
 
@@ -56,11 +63,18 @@ Written by `tools::finish_with_artifact` (`src/tools/mod.rs`) whenever `stdout.c
 - `FunctionCall` custom deserializer (`deserialize_arguments`) accepts both JSON objects and stringified JSON objects; unparseable strings become `{"__unparsed": raw}` for bounded repair rather than crashing deserialization.
 - Startup capability probe (`run_startup_probe`) forces `PROBE_TEMPERATURE = 0.0`, `max_tokens = 128`, asserts `with.usage.prompt_tokens > without.usage.prompt_tokens`, and requires a parsed native `read_file` tool call.
 
-### 2.2 Core Rust Library API (`src/lib.rs`)
+### 2.2 Core Rust Library API (`src/lib.rs`, `src/loop_engine/engine.rs`, `src/context.rs`)
 
 `run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(transport, config, ctx, verifier, approver, emit) -> Result<RunReport, ModelError>`:
 - Traits: `ChatTransport` (`health`, `chat`), `Verifier` (`verify -> VerifyOutcome`), `Approver` (`request -> ApprovalDecision`).
 - `RunConfig` owns `model`, `task`, `done_condition`, `boundaries`, `verify_command`, `max_steps` (default `12`), `context_tokens` (default `8192`, min `512`), `cancel: Arc<AtomicBool>`, `verify_on_write` (default `false`).
+- `run_agent` clones `ctx` with `.with_context_tokens(config.context_tokens)` so `ToolContext::context_tokens` always matches the active `RunConfig` window.
+- `RunEvent` variants: `Plan`, `ToolCall`, `ToolResult`, `Verify`, `Finished`, `Escalated`, `TextOnlyRepair`, `ApprovalRequired`, `Masked { masked_turns, before_tokens, after_tokens }`, `Compacted { before_tokens, after_tokens }`.
+- `RunReport` fields: `status`, `steps`, `prompt_tokens`, `completion_tokens`, `cache_hits`, `prompt_ms`, `predicted_ms`, `tool_errors`, `malformed_repairs`, `masked_turns`, `compactions`, `final_text`, `events`.
+- Context engine contracts (`src/context.rs`, `src/loop_engine/engine.rs`):
+  - `effective_prompt_tokens(messages, reported_prompt_tokens, new_turn_tokens)`: uses `pt + new_turn_tokens` when `reported_prompt_tokens` is `Some(pt)` with `pt > 0`; falls back to `estimate_messages(messages) + TOOL_SCHEMA_TOKENS` only when `None` or `Some(0)`.
+  - `manage_context(...) -> ContextOutcome { masked_turns, mask_metrics, compact_metrics }` runs Tier 1 `mask_old_observations` above `75%` and Tier 2 `compact_with_metrics` above `85%` (or when `masked_turns == 0`, or when masking leaves estimated effective tokens `>= 75%`).
+  - `active_observation_chars(&messages)` recomputes unmasked observation char load after Tier 1 masking when Tier 2 does not run; `over_observation_budget` (`observation_chars > observation_budget`) invokes `compact_with_metrics` directly and resets `observation_chars = 0`.
 
 ### 2.3 Tauri IPC Bridge (`desktop/src-tauri/src/main.rs`)
 
@@ -71,7 +85,7 @@ Written by `tools::finish_with_artifact` (`src/tools/mod.rs`) whenever `stdout.c
 | Command (UI → Core) | `run_task` | Accepts `task`, `done_condition`, `boundaries`, `verify_command`, `cwd`, `mode`, `model`; runs `ensure_probe` + `run_agent` on `spawn_blocking` |
 | Command (UI → Core) | `approve(id)` / `deny(id)` | Resolves pending `mpsc::Sender<ApprovalDecision>` in `ApprovalRegistry` |
 | Command (UI → Core) | `cancel_run` | Sets `AppState::cancel` (`AtomicBool`) and calls `approvals.deny_all()` to unblock waiting gates immediately |
-| Event (Core → UI) | `run_event` | Streams `UiEvent { kind, title, detail, status, meta }` (`probe`, `plan`, `tool_call`, `tool_result`, `verify`, `done`, `escalated`, `repair`, `approval`, `compaction`, `max_steps`) |
+| Event (Core → UI) | `run_event` | Streams `UiEvent { kind, title, detail, status, meta }` (`probe`, `plan`, `tool_call`, `tool_result`, `verify`, `done`, `escalated`, `repair`, `approval`, `observation_mask`, `compaction`, `max_steps`) |
 | Event (Core → UI) | `approval_required` | Sends `ApprovalRequest { id, tool, args, hash }` |
 
 ---
@@ -94,19 +108,23 @@ Written by `tools::finish_with_artifact` (`src/tools/mod.rs`) whenever `stdout.c
 | Context window | `8192` tokens default (`-c 8192 -np 1`, min `512`) | `src/model/mod.rs`, `src/context.rs`, `src/loop_engine/engine.rs` |
 | Generation cap | `DEFAULT_MAX_TOKENS = 512` (`128` for probe) | `src/model/mod.rs` |
 | Step cap | `12` (`RunConfig::default`), `8` (`src/bin/run.rs`), `6` (`src/bin/eval.rs`) | `src/loop_engine/engine.rs`, `src/bin/` |
-| Observation per-result cap | `min(floor(ctx * 0.3) * 4, hard_cap)` → `9,828` chars at 8K (`16k`/`32k`/`64k` tiers) | `src/tools/observation.rs` |
-| Total observation budget | `max(1024, floor(ctx * 2 * 0.5))` → `8,192` chars at 8K | `src/tools/observation.rs` |
-| Context thresholds (Phase 2) | Tier 1 mask `75%` (`MASK_AT`), Tier 2 compact `85%` (`COMPACT_AT`), `KEEP_RECENT_TURNS = 2`, `KEEP_RECENT = 4`, `TOOL_SCHEMA_TOKENS = 1200` | `src/context.rs` |
-| Search bounds | `max_results` default `50`; skips `.git`, `target`, `node_modules`, `dist`, `.tinyloop` and files `> 1 MB` | `src/tools/fs_tools.rs` |
+| Observation per-result cap | `min(floor(ctx * 0.3) * 4, hard_cap)` → `9,828` chars at 8K (`16k`/`32k`/`64k` tiers) | `src/tools/observation.rs`, `src/tools/mod.rs` |
+| Total observation budget | `max(1024, floor(ctx * 2 * 0.5))` → `8,192` chars at 8K; tracked via `observation_chars` & `active_observation_chars` | `src/tools/observation.rs`, `src/loop_engine/engine.rs` |
+| Context thresholds | Tier 1 mask `75%` (`MASK_AT`), Tier 2 compact `85%` (`COMPACT_AT`), `KEEP_RECENT_TURNS = 2`, `KEEP_RECENT = 4`, `TOOL_SCHEMA_TOKENS = 1200`, `MASKED_EXCERPT_MARKER` | `src/context.rs` |
+| Read & directory bounds | `read_file`: `DEFAULT_READ_LIMIT = 160`, `MAX_READ_LIMIT = 400`; dir listing skips `LIST_SKIP_DIRS` (`.git`, `target`, `node_modules`, `.tinyloop`), caps at `MAX_DIR_ENTRIES = 100` | `src/tools/fs_tools.rs` |
+| Search bounds | `ignore::WalkBuilder` (`.gitignore`, global/exclude, `hidden(true)`, `follow_links(false)`), optional `glob` (`OverrideBuilder`), `max_results` `1..=50` (default `50`), skips files `> 1,000,000` bytes (`MAX_SEARCH_FILE_BYTES`) and binary files (`BINARY_SNIFF_BYTES = 8 KiB`) | `src/tools/fs_tools.rs` |
+| Repo map bounds | `REPO_MAP_BUDGET_CHARS = 1600`, `MAX_FILE_BYTES = 64 KiB`, `MAX_DEFS_PER_FILE = 6`, skips hidden/symlinks/`SKIP_DIRS` (`.git`, `target`, `node_modules`, `dist`, `.tinyloop`, `vendor`); injected once when `files > 3` | `src/tools/repo_map.rs`, `src/loop_engine/engine.rs` |
 | Subprocess capture & timeout | `MAX_CAPTURE_BYTES = 2 MiB` per stream (pipe drained past cap to prevent deadlock); `30s` default shell timeout, `MAX_TIMEOUT_SECS = 120s`; verifier timeout `120s`, output cap `4000` chars | `src/tools/shell.rs`, `src/loop_engine/engine.rs` |
 
 ---
 
 ## 5. Security Controls
 
-1. **Filesystem Confinement (`src/tools/fs_tools.rs`)**:
+1. **Filesystem Confinement (`src/tools/fs_tools.rs`, `src/tools/repo_map.rs`)**:
    - `resolve_existing` canonicalizes both `ctx.root` and target and rejects any path whose canonical prefix is outside `root_canon`.
    - `resolve_for_write` checks `std::fs::symlink_metadata` before canonicalization and rejects **any** symlink target (even symlinks pointing inside the workspace) so writes cannot race or follow untrusted links.
+   - `resolve_for_create` (used by `apply_patch` when `old_string == ""`) enforces `ensure_workspace_relative`, walks up to the nearest existing ancestor to ensure no symlinked ancestor redirects creation outside `root_canon`, creates parent dirs, and re-verifies `parent_canon.starts_with(&root_canon)`.
+   - `repo_map::collect_source_files` skips symlinks (`file_type.is_symlink()`) so map generation never follows links outside the workspace.
 2. **Subprocess Policy (`src/tools/shell.rs`)**:
    - Rejects shell metacharacters (`|`, `&`, `;`, `<`, `>`, `$`, `` ` ``, `\n`, `\r`) — no shell interpreter (`sh`/`cmd`) is spawned by `run_command`.
    - Parses arguments with `split_command` (preserving single/double quotes and Windows backslashes; rejecting unmatched quotes).
@@ -128,4 +146,4 @@ Written by `tools::finish_with_artifact` (`src/tools/mod.rs`) whenever `stdout.c
   - **Invalid plan (`submit_plan`)**: must contain `3..=6` steps using known tools; grants 1 repair, escalates on 2nd (`plan_repairs > 1`).
   - **Repeat streak**: `repeat_guard::observe` appends a system note to `ToolResult.next_actions` on the 3rd identical call and escalates (`TOOL_REPEAT_LIMIT_CODE`) on the 4th.
   - **Verifier failure**: returns `ToolResult::error("verifier failed", <truncated output>)`; escalates after 3 failures (`verify_failures >= 3`).
-  - **Tool errors**: returned as structured `ToolResult { status: "error", summary, next_actions, ... }` so the model receives actionable recovery hints instead of crashes.
+  - **Tool errors**: returned as structured `ToolResult { status: "error", summary, next_actions, ... }` (including whitespace-normalized line hints on `apply_patch` 0-match misses and valid line-range hints on out-of-range `read_file` offsets) so the model receives actionable recovery hints instead of crashes.

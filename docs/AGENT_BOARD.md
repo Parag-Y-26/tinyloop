@@ -14,6 +14,7 @@ Control pane for the current orchestration pass. One owner at a time; every card
 | card-006 Eval suite + metrics | **Merged** | hermes | `tests/eval/`, `src/bin/eval.rs` | 15/15 tasks, final-state grading, tool validity separate |
 | card-007 Installer | **Merged** | hermes | `desktop/src-tauri/tauri.conf.json` | MSI + NSIS installers build |
 | card-008 UI click-through harness | **Merged** | hermes | `desktop/src/App.test.tsx`, `desktop/src/App.tauri.test.tsx`, `desktop/src-tauri/capabilities/default.json` | 10/10 Vitest: clarify, theme, modes, palette, approval allow/deny, cancel, payload, core error; live event ACL fixed and window-bound |
+| card-009 Phase 2 context management, observation masking & protocol safety | **Merged** | swarm | `src/context.rs`, `src/tools/mod.rs`, `src/loop_engine/engine.rs`, `src/bin/run.rs`, `desktop/src-tauri/src/main.rs` | `cargo test --lib` 83/83, root & Tauri `clippy --all-targets -- -D warnings` pass, `cargo check --all-targets` pass, desktop `pnpm test` (2 files / 10 tests) + `pnpm build` pass |
 
 ## card-001 — Real model capability probe
 
@@ -63,6 +64,19 @@ Control pane for the current orchestration pass. One owner at a time; every card
 - **Live-window finding**: the `default` capability had no `windows` binding, so Tauri's ACL silently denied `event.listen`/`event.emit` on window `main` (the UI never saw `run_event` or `approval_required`). Fixed with `"windows": ["main"]`; after a debug rebuild the real WebView receives events and the timeline updates.
 - **Caveat**: `tauri-driver` + msedgedriver **158.0.4370.45** (matching WebView2) can now drive the real window. A full Allow/Deny click-through was attempted; the startup probe returned malformed tool calls twice at temperature 1.0, so the run stopped before an approval card. The gate itself remains covered by core tests and the mocked-bridge Vitest file.
 - **State**: merged.
+
+## card-009 — Phase 2 context management, observation masking & protocol safety
+
+- **Acceptance**: real `prompt_tokens + new_turn_tokens` threshold tracking (fallback only when `== 0`), `config.context_tokens` propagated to `ToolContext` + `resolve_tool_result_budget`, atomic `(assistant(tool_calls) + tool)` `KEEP_RECENT` slicing, single `role: "system"` message + `role: "user"` state recap, `state.compactions` incremented before `write_state`/`render`, `prefix_reset` (`reason: "compaction"`) audit event, Tier 1 `75%` block masking before Tier 2 `85%` compaction, `RunReport::{masked_turns, compactions}` + `RunEvent::Masked`, sparse `ToolResult` JSON preserving `"command produced no output"`, and unit/integration tests covering tool-pair boundaries, single-system invariant, and block masking.
+- **Commits**: `1add346`, `0b2e4dc`, `b8786af` (plus `e2ed854` ACI reads, `ignore`-based search, and `repo_map` on HEAD).
+- **Evidence** (verified in swarm board #14):
+  - `cargo test --lib`: **83 passed, 0 failed, 0 ignored**
+  - `cargo clippy --all-targets -- -D warnings`: **PASS** (0 warnings)
+  - `cargo check --all-targets`: **PASS**
+  - `desktop` (`pnpm test; pnpm build`): **2 test files / 10 tests passed**; `tsc --noEmit && vite build` **PASS**
+  - `desktop/src-tauri` (`cargo check/clippy --locked --all-targets -- -D warnings`): **PASS**
+  - `git status`: clean
+- **Gate**: passed.
 
 ## Blockers
 
