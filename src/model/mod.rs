@@ -281,9 +281,9 @@ pub fn probe_tool() -> ToolDef {
 }
 
 /// Live probes at temperature 1.0 produced malformed tool calls twice
-/// (docs/AGENT_BOARD.md). Probe with low temperature; the loop keeps the
-/// frozen vendor sampling.
-pub const PROBE_TEMPERATURE: f64 = 0.2;
+/// (docs/AGENT_BOARD.md). The probe is deterministic at 0.0; the loop keeps
+/// the frozen vendor sampling.
+pub const PROBE_TEMPERATURE: f64 = 0.0;
 
 fn probe_base(model: &str, prompt: &str) -> ChatRequest {
     ChatRequest::for_model(model)
@@ -415,7 +415,8 @@ mod tests {
         run_startup_probe(&fake, "spark-x26", None).unwrap();
         let requests = fake.requests.borrow();
         assert_eq!(requests.len(), 3);
-        assert!(requests.iter().all(|r| r.temperature == PROBE_TEMPERATURE));
+        assert_eq!(PROBE_TEMPERATURE, 0.0);
+        assert!(requests.iter().all(|r| r.temperature == 0.0));
     }
 
     #[test]

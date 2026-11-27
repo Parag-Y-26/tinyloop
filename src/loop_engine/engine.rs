@@ -82,6 +82,9 @@ pub struct RunConfig {
     pub max_steps: usize,
     pub context_tokens: usize,
     pub cancel: Arc<AtomicBool>,
+    /// Opt-in: run the verifier immediately after every successful mutation.
+    /// Off by default; verification belongs on `finish`.
+    pub verify_on_write: bool,
 }
 
 impl RunConfig {
@@ -91,6 +94,7 @@ impl RunConfig {
             boundaries: vec![], verify_command: None, max_steps: 12,
             context_tokens: context::DEFAULT_CONTEXT_TOKENS,
             cancel: Arc::new(AtomicBool::new(false)),
+            verify_on_write: false,
         }
     }
     pub fn with_boundaries(mut self, boundaries: Vec<String>) -> Self { self.boundaries = boundaries; self }
@@ -98,6 +102,7 @@ impl RunConfig {
     pub fn with_max_steps(mut self, steps: usize) -> Self { self.max_steps = steps; self }
     pub fn with_context_tokens(mut self, tokens: usize) -> Self { self.context_tokens = tokens.max(512); self }
     pub fn with_cancel(mut self, cancel: Arc<AtomicBool>) -> Self { self.cancel = cancel; self }
+    pub fn with_verify_on_write(mut self, enabled: bool) -> Self { self.verify_on_write = enabled; self }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -126,6 +131,7 @@ pub struct RunReport {
     pub prompt_ms: f64,
     pub predicted_ms: f64,
     pub tool_errors: u32,
+    pub malformed_repairs: u32,
     pub final_text: Option<String>,
     pub events: Vec<RunEvent>,
 }
@@ -260,6 +266,7 @@ fn finalize_run(mut report: RunReport, audit: &AuditLog) -> RunReport {
         "prompt_ms": report.prompt_ms,
         "predicted_ms": report.predicted_ms,
         "tool_errors": report.tool_errors,
+        "malformed_repairs": report.malformed_repairs,
     }));
     report.status = report.status.or(Some(RunStatus::MaxSteps));
     report
@@ -289,7 +296,6 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
     let mut repeat = RepeatState::default();
     let mut verify_failures = 0u32;
     let mut text_only_repairs = 0u32;
-    let mut malformed_repairs = 0u32;
     let mut plan_repairs = 0u32;
     let mut observation_chars = 0usize;
     let mut last_prompt_tokens: Option<u32> = None;
@@ -355,12 +361,12 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
         }
 
         if let Some(raw) = call.function.malformed_text() {
-            malformed_repairs += 1;
+            report.malformed_repairs += 1;
             push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::TextOnlyRepair {
                 text: format!("malformed tool arguments, not executed: {}", raw.chars().take(160).collect::<String>()),
             });
             steps += 1;
-            if malformed_repairs > 1 {
+            if report.malformed_repairs > 1 {
                 let reason = "model produced malformed tool arguments twice".to_string();
                 push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Escalated { reason: reason.clone() });
                 report.status = Some(RunStatus::Escalated);
@@ -467,6 +473,18 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
                     push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Escalated { reason: reason.clone() });
                     report.status = Some(RunStatus::Escalated);
                     report.final_text = Some(reason);
+                    report.steps = steps;
+                    return Ok(finalize_run(report, &audit));
+                }
+            }
+            "apply_patch" | "run_command" if config.verify_on_write && allowed => {
+                // Opt-in only: the default path waits for an explicit `finish`.
+                let outcome = verifier.verify();
+                push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Verify { passed: outcome.passed, output: outcome.output.clone() });
+                if outcome.passed {
+                    push_emit(&mut report.events, &mut emit, Some(&audit), RunEvent::Finished { summary: "verifier passed".into() });
+                    report.status = Some(RunStatus::Done);
+                    report.final_text = Some("verifier passed".into());
                     report.steps = steps;
                     return Ok(finalize_run(report, &audit));
                 }
@@ -792,6 +810,7 @@ mod tests {
         let config = RunConfig::new("spark-x26", "fix", "rate 10").with_max_steps(6);
         let report = run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
         assert_eq!(report.status, Some(RunStatus::Done));
+        assert_eq!(report.malformed_repairs, 1);
         assert!(fs::read_to_string(root.join("tax.txt")).unwrap().contains("rate = 10"));
         assert!(report.events.iter().any(|e| matches!(e, RunEvent::TextOnlyRepair { text } if text.contains("malformed"))));
     }
@@ -809,7 +828,27 @@ mod tests {
         let config = RunConfig::new("spark-x26", "fix", "rate 10").with_max_steps(6);
         let report = run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
         assert_eq!(report.status, Some(RunStatus::Escalated));
+        assert_eq!(report.malformed_repairs, 2);
         assert!(report.final_text.unwrap().contains("malformed"));
+    }
+
+    #[test]
+    fn verify_on_write_flag_runs_the_verifier_after_a_mutation() {
+        let root = workspace("verify-on-write");
+        fs::write(root.join("tax.txt"), "rate = 8\n").unwrap();
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let transport = FakeTransport::new(vec![
+            call("submit_plan", serde_json::json!({"steps":[{"tool":"apply_patch","description":"fix"},{"tool":"finish","description":"verify"},{"tool":"read_file","description":"check"}]})),
+            call("apply_patch", serde_json::json!({"path":"tax.txt","old_string":"rate = 8","new_string":"rate = 10"})),
+        ]);
+        let verifier = CountingVerifier { passes: Cell::new(true), calls: Cell::new(0) };
+        let config = RunConfig::new("spark-x26", "fix", "rate 10")
+            .with_max_steps(4)
+            .with_verify_on_write(true);
+        let report = run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
+        assert_eq!(report.status, Some(RunStatus::Done));
+        assert_eq!(verifier.calls.get(), 1);
+        assert!(fs::read_to_string(root.join("tax.txt")).unwrap().contains("rate = 10"));
     }
 
     #[test]

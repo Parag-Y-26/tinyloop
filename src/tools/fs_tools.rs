@@ -14,19 +14,27 @@ fn resolve_existing(root: &Path, rel: &str) -> Result<PathBuf, String> {
 fn resolve_for_write(root: &Path, rel: &str) -> Result<PathBuf, String> {
     let root_canon = root.canonicalize().map_err(|e| format!("cannot resolve workspace: {e}"))?;
     let joined = root.join(rel);
-    // `symlink_metadata` also catches broken links that `exists()` misses.
-    if std::fs::symlink_metadata(&joined).is_ok() {
-        // An existing path may be a symlink; follow it and re-check so a
-        // workspace-local link cannot redirect the write outside the root.
-        let canon = joined.canonicalize().map_err(|e| format!("cannot resolve {rel}: {e}"))?;
-        if !canon.starts_with(&root_canon) { return Err(format!("path escapes workspace: {rel}")); }
-        return Ok(canon);
+    // `symlink_metadata` does not follow links, so it also sees broken links
+    // that `exists()` misses.
+    match std::fs::symlink_metadata(&joined) {
+        Ok(meta) => {
+            // Never write through a symlink: the link target is outside the
+            // caller's control even when it currently resolves inside.
+            if meta.file_type().is_symlink() {
+                return Err(format!("path escapes workspace: {rel} is a symlink"));
+            }
+            let canon = joined.canonicalize().map_err(|e| format!("cannot resolve {rel}: {e}"))?;
+            if !canon.starts_with(&root_canon) { return Err(format!("path escapes workspace: {rel}")); }
+            Ok(canon)
+        }
+        Err(_) => {
+            let parent = joined.parent().ok_or_else(|| "path has no parent".to_string())?;
+            let parent_canon = parent.canonicalize().map_err(|e| format!("cannot resolve parent of {rel}: {e}"))?;
+            if !parent_canon.starts_with(&root_canon) { return Err(format!("path escapes workspace: {rel}")); }
+            let file_name = joined.file_name().ok_or_else(|| format!("{rel} has no file name"))?;
+            Ok(parent_canon.join(file_name))
+        }
     }
-    let parent = joined.parent().ok_or_else(|| "path has no parent".to_string())?;
-    let parent_canon = parent.canonicalize().map_err(|e| format!("cannot resolve parent of {rel}: {e}"))?;
-    if !parent_canon.starts_with(&root_canon) { return Err(format!("path escapes workspace: {rel}")); }
-    let file_name = joined.file_name().ok_or_else(|| format!("{rel} has no file name"))?;
-    Ok(parent_canon.join(file_name))
 }
 
 pub fn read_file(ctx: &ToolContext, args: &Value) -> ToolResult {
@@ -94,29 +102,74 @@ mod tests {
     use crate::tools::RunMode;
     use serde_json::json;
 
-    #[cfg(unix)]
-    #[test]
-    fn symlink_write_escape_is_rejected() {
-        let root = std::env::temp_dir().join(format!("tinyloop-fs-{}", crate::audit::now_ms()));
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("tinyloop-fs-{name}-{}", crate::audit::now_ms()));
         std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Symlink creation needs Developer Mode on Windows; tests that depend on
+    /// it skip when the OS refuses.
+    fn try_symlink_file(target: &Path, link: &Path) -> bool {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).is_ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link).is_ok()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            false
+        }
+    }
+
+    #[test]
+    fn symlink_escape_is_rejected_by_read_and_write() {
+        let root = temp_root("link-outside");
         let outside = root
             .parent()
             .unwrap()
             .join(format!("tinyloop-fs-outside-{}.txt", crate::audit::now_ms()));
         std::fs::write(&outside, "secret").unwrap();
-        std::os::unix::fs::symlink(&outside, root.join("link.txt")).unwrap();
+        let link = root.join("link.txt");
+        if !try_symlink_file(&outside, &link) {
+            eprintln!("skipping symlink escape test: link creation not permitted");
+            return;
+        }
 
         let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
-        let result = apply_patch(&ctx, &json!({"path": "link.txt", "old_string": "secret", "new_string": "pwned"}));
-        assert_eq!(result.status, "error");
-        assert!(result.summary.contains("escapes"));
+        let read = read_file(&ctx, &json!({"path": "link.txt"}));
+        assert_eq!(read.status, "error");
+        assert!(read.summary.contains("escapes"), "{}", read.summary);
+
+        let write = apply_patch(&ctx, &json!({"path": "link.txt", "old_string": "secret", "new_string": "pwned"}));
+        assert_eq!(write.status, "error");
+        assert!(write.summary.contains("escapes"), "{}", write.summary);
         assert_eq!(std::fs::read_to_string(&outside).unwrap(), "secret");
     }
 
     #[test]
+    fn writes_through_any_symlink_are_rejected() {
+        let root = temp_root("link-inside");
+        std::fs::write(root.join("a.txt"), "old").unwrap();
+        let link = root.join("link.txt");
+        if !try_symlink_file(&root.join("a.txt"), &link) {
+            eprintln!("skipping symlink write test: link creation not permitted");
+            return;
+        }
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let result = apply_patch(&ctx, &json!({"path": "link.txt", "old_string": "old", "new_string": "new"}));
+        assert_eq!(result.status, "error");
+        assert!(result.summary.contains("symlink"), "{}", result.summary);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "old");
+    }
+
+    #[test]
     fn existing_file_inside_the_workspace_is_writable() {
-        let root = std::env::temp_dir().join(format!("tinyloop-fs-ok-{}", crate::audit::now_ms()));
-        std::fs::create_dir_all(&root).unwrap();
+        let root = temp_root("ok");
         std::fs::write(root.join("a.txt"), "old").unwrap();
         let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
         let result = apply_patch(&ctx, &json!({"path": "a.txt", "old_string": "old", "new_string": "new"}));

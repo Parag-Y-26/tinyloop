@@ -24,6 +24,8 @@ pub struct ToolContext {
     /// Context window used to derive live result caps. `run_agent` overrides
     /// this with `RunConfig::context_tokens` before executing any tool.
     pub context_tokens: usize,
+    /// Opt-in: allow `python -c` inline code. Denied by default.
+    pub allow_inline_code: bool,
 }
 
 impl ToolContext {
@@ -34,11 +36,17 @@ impl ToolContext {
                 .iter().map(|s| s.to_string()).collect(),
             timeout: Duration::from_secs(30),
             context_tokens: crate::model::DEFAULT_CONTEXT,
+            allow_inline_code: false,
         }
     }
 
     pub fn with_context_tokens(mut self, tokens: usize) -> Self {
         self.context_tokens = tokens.max(512);
+        self
+    }
+
+    pub fn with_inline_code(mut self, allow: bool) -> Self {
+        self.allow_inline_code = allow;
         self
     }
 }
