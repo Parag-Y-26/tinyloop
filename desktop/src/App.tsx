@@ -152,7 +152,7 @@ export default function App() {
         <div className="pill"><i className="live"/>Spark X2.6 · 4B · 8K</div>
         <button className="icon-btn" aria-label="Appearance" onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}>◐</button>
         {running && <button className="icon-btn" aria-label="Cancel run" onClick={cancel}>■</button>}
-        <button className="run-btn" disabled={running} onClick={run}>▶ Run</button>
+        <button className="run-btn" data-testid="run-button" disabled={running} onClick={run}>▶ Run</button>
       </header>
 
       <div className="body">
@@ -179,7 +179,7 @@ export default function App() {
             </motion.div>)}
           </AnimatePresence></div>
           <div className="composer"><div className="field">
-            <textarea rows={1} value={composer} placeholder="Describe a task for the agent…" onChange={e => setComposer(e.target.value)}
+            <textarea data-testid="task-input" rows={1} value={composer} placeholder="Describe a task for the agent…" onChange={e => setComposer(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void run(); } }} />
             <button className="send" aria-label="Send" onClick={() => void run()}>↑</button>
           </div><div className="hint"><span><kbd>↵</kbd> send</span><span><kbd>⌘K</kbd> commands</span></div></div>
@@ -188,9 +188,9 @@ export default function App() {
         <aside className="inspector">
           {isTauri && <div className="section"><h2>Run setup</h2><div className="contract">
             <label className="k">Workspace</label>
-            <input className="run-input" value={workspace} onChange={e => setWorkspace(e.target.value)} />
+            <input className="run-input" data-testid="workspace-input" value={workspace} onChange={e => setWorkspace(e.target.value)} />
             <label className="k">Verifier</label>
-            <input className="run-input" value={verifyCommand} onChange={e => setVerifyCommand(e.target.value)} />
+            <input className="run-input" data-testid="verifier-input" value={verifyCommand} onChange={e => setVerifyCommand(e.target.value)} />
             <p className="k" style={{ marginTop: 6 }}>Ask mode blocks writes until approval is wired; use Auto for a full run.</p>
           </div></div>}
           <div className="section"><h2>Goal</h2><div className="contract"><p><span className="k">Done when</span><code>cargo test</code> exits 0 and <code>src/tax.rs</code> contains <code>fn calc_total</code></p></div></div>
@@ -198,11 +198,11 @@ export default function App() {
           <div className="section"><h2>Verifier</h2><div className="contract"><p><code>cargo test --quiet</code><br/><span className="k">Judge</span><code>Rust, not the model</code></p></div></div>
           <div className="divider"/>
           <div className="section"><h2>Approval</h2>
-            {pendingApproval ? <div className="approval"><div className="head"><i className="dot2"/>Approval required</div>
+            {pendingApproval ? <div className="approval" data-testid="approval-card"><div className="head"><i className="dot2"/>Approval required</div>
               <div className="cmd">{pendingApproval.tool} {JSON.stringify(pendingApproval.args)}</div>
               <div className="hash">bound to sha256:{pendingApproval.hash.slice(0, 8)}…{pendingApproval.hash.slice(-4)}</div>
-              <div className="actions"><button className="btn primary" onClick={() => void decide('approve')}>Allow</button>
-                <button className="btn quiet" onClick={() => void decide('deny')}>Deny</button></div></div>
+              <div className="actions"><button className="btn primary" data-testid="allow-button" onClick={() => void decide('approve')}>Allow</button>
+                <button className="btn quiet" data-testid="deny-button" onClick={() => void decide('deny')}>Deny</button></div></div>
               : <div className="resolved"><span className="ok">{approval === 'allowed' ? '✓' : approval === 'denied' ? '×' : '·'}</span> {approval === 'allowed' ? 'Approved and bound' : approval === 'denied' ? 'Denied — no changes made' : 'Waiting for a gate'}</div>}
           </div>
         </aside>
@@ -216,7 +216,7 @@ export default function App() {
         <textarea className="clarify-input" rows={4} value={boundariesText} onChange={e => setBoundariesText(e.target.value)} />
         <div className="actions">
           <button className="btn quiet" onClick={() => setClarifyOpen(false)}>Cancel</button>
-          <button className="btn primary" onClick={() => { setClarified(true); setClarifyOpen(false); void executeRun(); }}>Confirm &amp; Run</button>
+          <button className="btn primary" data-testid="clarify-confirm" onClick={() => { setClarified(true); setClarifyOpen(false); void executeRun(); }}>Confirm &amp; Run</button>
         </div>
       </div></div>}
 
