@@ -2,7 +2,7 @@
 
 A Rust CLI computer-use agent that runs a **small local model** and does real tasks on your machine under a bounded, verifiable loop.
 
-**Status:** design phase. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+**Status:** implemented — Rust core plus Tauri/React desktop app, verified against the real model. Card status lives on [`docs/AGENT_BOARD.md`](docs/AGENT_BOARD.md).
 
 ## Decisions so far
 
@@ -29,11 +29,12 @@ The model proposes actions. **Rust owns the loop, the budget, the sandbox, and t
 
 ```
 tinyloop/
-├── README.md
-└── docs/
-    ├── ARCHITECTURE.md       # main design
-    ├── MODEL_PROFILE.md      # exact model/server settings (pending)
-    └── research/             # deep-dive findings from reference repos (in progress)
+├── src/                      # tinyloop-core: loop engine, tools, model client, audit, context
+├── src/bin/                  # run (headless), probe (capability), eval (15-task suite)
+├── tests/eval/               # deterministic eval tasks
+├── desktop/                  # Tauri 2 shell + React 19 UI
+├── docs/                     # architecture, model profile, eval, agent board, research
+└── README.md
 ```
 
 ## Docs
@@ -42,6 +43,8 @@ tinyloop/
 - [`docs/FLOW_REASONING.md`](docs/FLOW_REASONING.md) — why each stage exists, and the speed/accuracy tradeoff at each step
 - [`docs/REUSE_REGISTER.md`](docs/REUSE_REGISTER.md) — vendored files, licenses, and why each is better than writing it ourselves
 - [`docs/DESKTOP_UI.md`](docs/DESKTOP_UI.md) — Tauri + React desktop decision, Apple-like UI spec, core↔UI contract
+- [`docs/AGENT_BOARD.md`](docs/AGENT_BOARD.md) — card status, evidence, and remaining gaps
+- [`docs/EVAL_RESULTS.md`](docs/EVAL_RESULTS.md) — real-model eval numbers and limits
 
 ## Interface
 
@@ -68,4 +71,6 @@ Or launch the built binary at `desktop/src-tauri/target/release/tinyloop-tauri.e
 
 ## Next
 
-Phase 1: Cargo skeleton, `ModelClient`, and the startup capability probe (health check + verify that native tools actually reach the prompt). Waiting on: exact GGUF path, llama.cpp build version, and GPU availability.
+Core, desktop shell, approval gate, audit trail, context compaction, eval suite, and installers are landed (see the agent board). Tests: `cargo test --lib` (30), `pnpm test` in `desktop/` (10).
+
+The one open surface is automated click-through of Allow/Deny inside the native WebView, which needs `tauri-driver` plus a matching Edge WebDriver. The logic is covered in jsdom; the real-window click is still manual.

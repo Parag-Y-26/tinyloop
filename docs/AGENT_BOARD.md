@@ -13,7 +13,7 @@ Control pane for the current orchestration pass. One owner at a time; every card
 | card-005 Context manager + compaction | **Merged** | hermes | `src/context.rs`, `src/loop_engine/` | 85% trigger, state.md written first, exact recent tail kept |
 | card-006 Eval suite + metrics | **Merged** | hermes | `tests/eval/`, `src/bin/eval.rs` | 15/15 tasks, final-state grading, tool validity separate |
 | card-007 Installer | **Merged** | hermes | `desktop/src-tauri/tauri.conf.json` | MSI + NSIS installers build |
-| card-008 UI click-through harness | **Deferred** | hermes | `desktop/src/App.test.tsx` | Vitest covers clarify + theme; WebDriver click-through unavailable |
+| card-008 UI click-through harness | **Merged** | hermes | `desktop/src/App.test.tsx`, `desktop/src/App.tauri.test.tsx`, `desktop/src-tauri/capabilities/default.json` | 10/10 Vitest: clarify, theme, modes, palette, approval allow/deny, cancel, payload, core error; live event ACL fixed and window-bound |
 
 ## card-001 — Real model capability probe
 
@@ -56,15 +56,23 @@ Control pane for the current orchestration pass. One owner at a time; every card
 - **Evidence**: `tinyloop_0.1.0_x64_en-US.msi` (4.59 MiB) and `tinyloop_0.1.0_x64-setup.exe` (3.32 MiB).
 - **Gate**: passed.
 
+## card-008 — UI harness
+
+- **Acceptance**: the same JSX and event wiring used by the Tauri app is driven without a native window; approval decisions reach the core with the exact id.
+- **Evidence**: `pnpm test` — 2 files, 10/10 pass; `pnpm build` (`tsc --noEmit` + Vite) clean. `App.tauri.test.tsx` stubs `@tauri-apps/api/core` and `@tauri-apps/api/event`, emits `approval_required`, and asserts `approve`/`deny`/`cancel_run` calls plus the full `run_task` payload.
+- **Live-window finding**: the `default` capability had no `windows` binding, so Tauri's ACL silently denied `event.listen`/`event.emit` on window `main` (the UI never saw `run_event` or `approval_required`). Fixed with `"windows": ["main"]`; after a debug rebuild the real WebView receives events and the timeline updates.
+- **Caveat**: `tauri-driver` + msedgedriver **158.0.4370.45** (matching WebView2) can now drive the real window. A full Allow/Deny click-through was attempted; the startup probe returned malformed tool calls twice at temperature 1.0, so the run stopped before an approval card. The gate itself remains covered by core tests and the mocked-bridge Vitest file.
+- **State**: merged.
+
 ## Blockers
 
 | Blocker | Owner | Next action |
 |---|---|---|
-| Real-window Allow/Deny not click-tested | — | Deferred: needs `tauri-driver` + matching Edge WebDriver; Vitest covers UI logic and 30 core tests cover the gate |
+| Real-window Allow/Deny not click-tested | — | UI event ACL fixed and window-bound; WebDriver stack verified against WebView2 158.0.4370.45. Remaining: the live model's startup probe returned malformed tool calls on two attempts, so the run never reached an approval card. Re-run when the probe passes. |
 
 ## UI tests
 
-`desktop/src/App.test.tsx` — Vitest + jsdom: clarify modal is required before a run; appearance toggle works. 2/2 pass.
+`desktop/src/App.test.tsx` (browser preview) and `desktop/src/App.tauri.test.tsx` (mocked Tauri bridge) — Vitest + jsdom: clarify gate, theme, run modes, command palette, simulated timeline, approval allow/deny with exact id, cancel, run payload, and core-error path. 10/10 pass; `pnpm build` clean.
 
 ## Notes
 

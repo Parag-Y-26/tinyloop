@@ -87,10 +87,12 @@ Official `XHToken/Spark-MLX-LLM` works on original HF checkpoints with `spark-ml
 
 ## Phase 1 acceptance checklist
 
-- [ ] `llama-server` build reports `spark2_5` support
-- [ ] `/health` returns OK on port 9941
-- [ ] fixed prompt with/without `tools` yields different `prompt_tokens` (tools not silently dropped)
-- [ ] one tool call round-trips into `message.tool_calls` with dict arguments
-- [ ] `enable_thinking: false` returns non-empty `content` and valid tool calls
-- [ ] 8192 context fits in memory; startup log confirms KV size
-- [ ] `timings.cache_n` shows prefix reuse across turns
+Checked items are backed by the real-model probe or eval run; unchecked items were not captured on disk.
+
+- [x] `llama-server` build reports `spark2_5` support — build **12652** served the model (`docs/EVAL_RESULTS.md`).
+- [x] `/health` returns OK on port 9941 — `run_startup_probe` calls it first and the probe passed (`src/model/mod.rs`).
+- [x] fixed prompt with/without `tools` yields different `prompt_tokens` — **23 → 130** tokens (`docs/AGENT_BOARD.md`, card-001).
+- [x] one tool call round-trips into `message.tool_calls` with dict arguments — `tool_call_ok: true`; string arguments are normalized (`src/model/mod.rs`).
+- [ ] `enable_thinking: false` returns non-empty `content` and valid tool calls — valid tool calls are verified (probe plus 45/45 well-formed calls in the eval); non-empty `content` was not recorded separately.
+- [ ] 8192 context fits in memory; startup log confirms KV size — the server ran at `-c 8192 -np 1`, but the `llama_kv_cache: size = ... MiB` line was not saved.
+- [x] `timings.cache_n` shows prefix reuse across turns — 88.9% cache-hit share, ~2.2K–2.4K cached tokens by turn 2 (`docs/EVAL_RESULTS.md`).
