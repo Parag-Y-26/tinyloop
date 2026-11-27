@@ -2,6 +2,7 @@
 
 pub mod fs_tools;
 pub mod observation;
+pub mod repo_map;
 pub mod shell;
 
 use crate::model::ToolDef;
@@ -82,16 +83,16 @@ pub fn specs() -> Vec<ToolDef> {
         ToolDef::function("submit_plan", "Submit 3-6 steps before acting.", json!({
             "type":"object","properties":{"steps":{"type":"array","minItems":3,"maxItems":6,"items":{"type":"object","properties":{"tool":{"type":"string"},"description":{"type":"string"}},"required":["tool","description"]}}},"required":["steps"],"additionalProperties":false
         })),
-        ToolDef::function("read_file", "Read a UTF-8 file inside the workspace.", json!({
+        ToolDef::function("read_file", "Read a file with line numbers, or list a directory, inside the workspace.", json!({
             "type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer","minimum":0},"limit":{"type":"integer","minimum":1,"maximum":400}},"required":["path"],"additionalProperties":false
         })),
-        ToolDef::function("search_files", "Search text files for a literal string.", json!({
-            "type":"object","properties":{"pattern":{"type":"string","minLength":1},"path":{"type":"string"},"max_results":{"type":"integer","minimum":1,"maximum":50}},"required":["pattern"],"additionalProperties":false
+        ToolDef::function("search_files", "Search text files for a literal string; respects .gitignore and skips binaries.", json!({
+            "type":"object","properties":{"pattern":{"type":"string","minLength":1},"path":{"type":"string"},"glob":{"type":"string"},"max_results":{"type":"integer","minimum":1,"maximum":50}},"required":["pattern"],"additionalProperties":false
         })),
         ToolDef::function("run_command", "Run an allowlisted program inside the workspace.", json!({
             "type":"object","properties":{"command":{"type":"string"},"timeout_sec":{"type":"integer","minimum":1,"maximum":120}},"required":["command"],"additionalProperties":false
         })),
-        ToolDef::function("apply_patch", "Replace one exact string in a file. Fails if the match is not unique.", json!({
+        ToolDef::function("apply_patch", "Replace one exact string in a file, or create a new file when old_string is empty. Fails if the match is not unique.", json!({
             "type":"object","properties":{"path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"}},"required":["path","old_string","new_string"],"additionalProperties":false
         })),
         ToolDef::function("finish", "Ask the deterministic verifier to decide whether the task is done.", json!({

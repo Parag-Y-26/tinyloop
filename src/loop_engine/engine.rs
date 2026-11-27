@@ -289,9 +289,18 @@ pub fn run_agent<T: ChatTransport, V: Verifier, F: FnMut(&RunEvent)>(
     let observation_budget = tools::observation::resolve_tool_result_budget(config.context_tokens).max_context_chars;
     let mut report = RunReport::default();
     let mut context_state = ContextState::new(&config.task, &config.done_condition, &config.boundaries);
+    // One compact map beats several discovery turns for a 4B model. It is
+    // injected once into the first user message; the system prefix stays
+    // frozen.
+    let repo_map = tools::repo_map::build_repo_map(&ctx.root);
+    let mut intro = String::from("Start. Call submit_plan with 3 to 6 steps. Do not write prose.");
+    if repo_map.files > 3 && !repo_map.text.is_empty() {
+        intro.push_str("\n\nWorkspace map (deterministic, capped at ~1600 chars):\n");
+        intro.push_str(&repo_map.text);
+    }
     let mut messages = vec![
         Message::system(system_prompt(config)),
-        Message::user("Start. Call submit_plan with 3 to 6 steps. Do not write prose."),
+        Message::user(intro),
     ];
     let mut repeat = RepeatState::default();
     let mut verify_failures = 0u32;
@@ -584,6 +593,10 @@ mod tests {
         response.choices[0].message.reasoning_content = Some(reasoning.into());
         response
     }
+    fn with_prompt_tokens(mut response: ChatResponse, tokens: u32) -> ChatResponse {
+        response.usage.prompt_tokens = tokens;
+        response
+    }
 
     struct CountingVerifier { passes: Cell<bool>, calls: Cell<u32> }
     impl Verifier for CountingVerifier {
@@ -688,9 +701,11 @@ mod tests {
         let long_file = format!("{}\nrate = 8\n", "x".repeat(6000));
         fs::write(root.join("tax.txt"), long_file).unwrap();
         let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        // The upgraded context manager trusts the server-reported prompt
+        // tokens; the read response reports a nearly full window.
         let transport = FakeTransport::new(vec![
-            call("submit_plan", serde_json::json!({"steps":[{"tool":"read_file","description":"read the tax file carefully"},{"tool":"finish","description":"verify the result"},{"tool":"search_files","description":"confirm the change"}]})),
-            call("read_file", serde_json::json!({"path":"tax.txt"})),
+            with_prompt_tokens(call("submit_plan", serde_json::json!({"steps":[{"tool":"read_file","description":"read the tax file carefully"},{"tool":"finish","description":"verify the result"},{"tool":"search_files","description":"confirm the change"}]})), 200),
+            with_prompt_tokens(call("read_file", serde_json::json!({"path":"tax.txt"})), 600),
             call("finish", serde_json::json!({"summary":"done"})),
         ]);
         let verifier = FakeVerifier { passes: Cell::new(true) };
@@ -849,6 +864,37 @@ mod tests {
         assert_eq!(report.status, Some(RunStatus::Done));
         assert_eq!(verifier.calls.get(), 1);
         assert!(fs::read_to_string(root.join("tax.txt")).unwrap().contains("rate = 10"));
+    }
+
+    #[test]
+    fn repo_map_is_injected_only_for_workspaces_over_three_files() {
+        let small_root = workspace("map-small");
+        fs::write(small_root.join("a.rs"), "fn a() {}\n").unwrap();
+        fs::write(small_root.join("b.rs"), "fn b() {}\n").unwrap();
+        let small_ctx = ToolContext::new(&small_root, small_root.join(".tinyloop"), RunMode::Auto);
+        let small_transport = FakeTransport::new(vec![text("no tool")]);
+        let verifier = FakeVerifier { passes: Cell::new(true) };
+        let config = RunConfig::new("spark-x26", "task", "done").with_max_steps(1);
+        run_agent(&small_transport, &config, &small_ctx, &verifier, None, |_| {}).unwrap();
+        let small_requests = small_transport.requests.borrow();
+        let small_intro = small_requests[0].messages[1].content.clone().unwrap_or_default();
+        assert!(!small_intro.contains("[repo map]"));
+        drop(small_requests);
+
+        let root = workspace("map-large");
+        for name in ["a.rs", "b.rs", "c.rs", "d.rs"] {
+            fs::write(root.join(name), "pub fn alpha() {}\n").unwrap();
+        }
+        let ctx = ToolContext::new(&root, root.join(".tinyloop"), RunMode::Auto);
+        let transport = FakeTransport::new(vec![text("no tool")]);
+        let config = RunConfig::new("spark-x26", "task", "done").with_max_steps(1);
+        run_agent(&transport, &config, &ctx, &verifier, None, |_| {}).unwrap();
+        let requests = transport.requests.borrow();
+        let intro = requests[0].messages[1].content.clone().unwrap_or_default();
+        assert!(intro.contains("[repo map]"), "{intro}");
+        assert!(intro.contains("a.rs"), "{intro}");
+        assert!(intro.contains("pub fn alpha"), "{intro}");
+        assert!(intro.chars().count() < 2200, "map must stay compact");
     }
 
     #[test]
